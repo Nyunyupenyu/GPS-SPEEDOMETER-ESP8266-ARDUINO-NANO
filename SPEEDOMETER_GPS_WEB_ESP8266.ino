@@ -1,0 +1,951 @@
+/*
+ * Projek: Speedometer GPS IoT "Penyu" + Racing Dashboard & Telemetry Replay
+ * Fitur: OLED UI (V2.14), WiFi AP, LittleFS Logger (Default Filename), Replay Multi-Chart, ESP8266 Stats
+ * Hardware: ESP8266, GPS NEO-6M, OLED SSD1306 (0.96 Inch)
+ */
+
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <TinyGPS++.h>
+#include <SoftwareSerial.h>
+#include <ESP8266WiFi.h>
+#include <ESP8266WebServer.h>
+#include <LittleFS.h>
+
+// --- KONFIGURASI WIFI & SERVER ---
+const char* ssid = "RACE_PANEL_PENYU"; 
+const char* password = "masuk123";     
+ESP8266WebServer server(80);
+
+// --- KONFIGURASI PORT (PIN) ---
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_RESET -1
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+
+static const int RXPin = D5; 
+static const int TXPin = D6; 
+static const uint32_t GPSBaud = 9600;
+
+TinyGPSPlus gps;
+SoftwareSerial ss(RXPin, TXPin);
+
+// --- STATE & VARIABEL GLOBAL ---
+enum SystemState {
+  STATE_BOOTING, STATE_WELCOME, STATE_TITLE, STATE_CONNECTING, 
+  STATE_SPEEDOMETER, STATE_SCREENSAVER, STATE_SLEEP
+};
+
+SystemState currentState = STATE_BOOTING;
+unsigned long stateTimer = 0;
+unsigned long lastDisplayUpdate = 0;
+unsigned long lastMoveTime = 0; 
+unsigned long screensaverStartTime = 0; 
+
+// Variabel Memori Global & Statistik
+double topSpeed = 0.0;
+double lastAltitude = 0.0;
+char altTrend = '-'; 
+unsigned long lastAltTime = 0;
+
+double minAltitude = 9999.0;
+double maxAltitude = -9999.0;
+double sumSpeed = 0.0;
+unsigned long speedCount = 0;
+
+// Variabel Logger
+bool isLogging = false;
+String currentLogFile = "";
+unsigned long lastLogTime = 0;
+
+// --- DATA GAMBAR LOGO PENYU (128x64) ---
+const unsigned char epd_bitmap_PENYUPUTIH [] PROGMEM = {
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x3e, 0x7f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1f, 0xfe, 0x7f, 0xfd, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0xff, 0x00, 0x00, 0xff, 0xf0, 0x00, 0x00, 0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x7f, 0xc0, 0x31, 0xce, 0x03, 0xff, 0x00, 0x00, 0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 0x00, 0x03, 0xfc, 0x00, 0x71, 0x8e, 0x00, 0x3f, 0xc0, 0x00, 0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 0x00, 0x0f, 0xe0, 0x0c, 0x31, 0x8c, 0x20, 0x07, 0xf8, 0x00, 0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 0x00, 0x3f, 0x00, 0x0e, 0x39, 0x9c, 0x70, 0x01, 0xfe, 0x00, 0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 0x00, 0xfc, 0x01, 0x03, 0x8f, 0xf1, 0xc0, 0x80, 0x3f, 0x00, 0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 0x03, 0xf0, 0x07, 0xfe, 0xe3, 0xc7, 0x7f, 0xe0, 0x0f, 0xc0, 0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 0x07, 0xe0, 0x00, 0x03, 0xbb, 0xdd, 0xc0, 0x00, 0x07, 0xe0, 0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 0x0f, 0x80, 0x00, 0x1f, 0xdb, 0xd3, 0xf0, 0x00, 0x03, 0xf0, 0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 0x17, 0x0c, 0x00, 0x30, 0x5b, 0xd2, 0x08, 0x00, 0x30, 0xe8, 0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 0x20, 0x3f, 0xff, 0xe0, 0x4a, 0xd2, 0x0f, 0xff, 0xfc, 0x04, 0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x0f, 0xff, 0xff, 0x87, 0xff, 0xfb, 0xf8, 0x0f, 0xff, 0x07, 0xff, 0x80, 0xf8, 0x00, 
+  0x00, 0x00, 0x1f, 0xff, 0xff, 0xcf, 0xff, 0xf7, 0xfc, 0x1f, 0x7e, 0x3f, 0xbf, 0x01, 0xf0, 0x00, 
+  0x00, 0x00, 0x1f, 0xef, 0xff, 0xdf, 0xff, 0xe7, 0xfe, 0x3e, 0x3f, 0xfe, 0x7f, 0x03, 0xf0, 0x00, 
+  0x00, 0x00, 0x0f, 0xff, 0xff, 0xdf, 0xff, 0x8f, 0xff, 0x7c, 0x1f, 0xf0, 0x7e, 0x07, 0xe0, 0x00, 
+  0x00, 0x00, 0x1f, 0xff, 0xff, 0xbf, 0xff, 0x1f, 0x3f, 0xf8, 0x1f, 0x80, 0xfc, 0x0f, 0xc0, 0x00, 
+  0x00, 0x00, 0x3f, 0xff, 0xfe, 0x7e, 0x00, 0x3f, 0x1f, 0xf0, 0x1f, 0x01, 0xf8, 0x1f, 0x80, 0x00, 
+  0x00, 0x00, 0x7e, 0x00, 0x00, 0xff, 0xff, 0xbe, 0x0f, 0xe0, 0x3e, 0x01, 0xff, 0xff, 0x00, 0x00, 
+  0x00, 0x00, 0xfc, 0x00, 0x00, 0xff, 0xff, 0x7c, 0x07, 0xe0, 0x7e, 0x00, 0xff, 0xfe, 0x00, 0x00, 
+  0x00, 0x03, 0xf8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
+  0x00, 0x03, 0xf0, 0xff, 0xff, 0xff, 0xff, 0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xfe, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 0x1f, 0xff, 0xff, 0xc3, 0xff, 0xff, 0xfd, 0xff, 0xff, 0xff, 0xf8, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 0x0f, 0xe1, 0xe1, 0xff, 0xff, 0xff, 0xfc, 0x87, 0x87, 0xf0, 0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 0x07, 0xf0, 0x7f, 0xbc, 0x03, 0x06, 0x0d, 0xfe, 0x1f, 0xe0, 0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 0x03, 0xfc, 0x00, 0x04, 0x03, 0x06, 0x0c, 0x00, 0x3f, 0xc0, 0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 0x01, 0xff, 0x00, 0x07, 0xff, 0xff, 0xfc, 0x00, 0xff, 0x80, 0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 0x00, 0x7f, 0xc0, 0x3f, 0xff, 0xff, 0xf8, 0x03, 0xfe, 0x00, 0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 0x00, 0x3f, 0xf8, 0x38, 0x00, 0x00, 0x00, 0x1f, 0xfc, 0x00, 0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 0x00, 0x0f, 0xff, 0x00, 0x00, 0x00, 0x01, 0xff, 0xf0, 0x00, 0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 0x00, 0x01, 0xff, 0xc0, 0x00, 0x00, 0x7f, 0xff, 0x80, 0x00, 0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x7f, 0xff, 0x80, 0x1f, 0xff, 0xfe, 0x00, 0x00, 0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x07, 0xff, 0xff, 0x7f, 0xff, 0x60, 0x00, 0x00, 0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0xfe, 0x7f, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+};
+
+// =========================================================================
+// HTML & JAVASCRIPT WEB DASHBOARD
+// =========================================================================
+const char INDEX_HTML[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RACE PANEL - PENYU</title>
+  <style>
+    body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #111; color: #fff; text-align: center; margin: 0; padding: 10px; }
+    .card { background: #1e1e1e; padding: 15px; border-radius: 12px; border: 1px solid #333; box-shadow: 0 8px 16px rgba(0,0,0,0.5); margin-bottom: 15px; position: relative; }
+    h2, h3 { color: #fff; margin-top: 0; letter-spacing: 1px; font-style: italic; border-bottom: 1px solid #333; padding-bottom: 5px;}
+    
+    .btn-restart-top { position: absolute; top: 12px; right: 15px; background: #ff8800; color: #fff; border: none; padding: 5px 10px; font-size: 11px; font-weight: bold; border-radius: 4px; cursor: pointer; text-transform: uppercase; }
+
+    .sys-stats { display: flex; justify-content: space-around; background: #151515; padding: 8px; border-radius: 6px; margin-bottom: 12px; font-size: 11px; border: 1px dashed #333; }
+    .stat-item span { color: #00ff88; font-weight: bold; }
+
+    .gauge-container { position: relative; width: 240px; height: 130px; margin: 10px auto 0; }
+    .gauge-svg { width: 100%; height: 100%; }
+    .gauge-bg { fill: none; stroke: #2a2a2a; stroke-width: 12; stroke-linecap: round; }
+    .gauge-value { fill: none; stroke: #00ff88; stroke-width: 12; stroke-linecap: round; stroke-dasharray: 126; stroke-dashoffset: 126; transition: stroke-dashoffset 0.2s ease-out, stroke 0.3s; }
+    .speed-text-container { position: absolute; top: 45px; width: 100%; text-align: center; }
+    .speed-val { font-size: 3.5em; font-weight: 900; color: #fff; line-height: 1; font-style: italic; }
+    .speed-unit { font-size: 14px; color: #888; font-weight: bold; letter-spacing: 2px;}
+
+    .grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 15px; margin-bottom: 15px;}
+    .box { background: #252525; padding: 10px 12px; border-radius: 8px; text-align: left; }
+    .box-header { display: flex; justify-content: space-between; font-size: 12px; color: #aaa; margin-bottom: 5px; font-weight: bold; text-transform: uppercase;}
+    
+    .linear-bar-bg { width: 100%; height: 6px; background: #111; border-radius: 3px; overflow: hidden; margin-top: 5px; }
+    .linear-bar-fill { height: 100%; width: 0%; transition: width 0.3s ease-out; }
+    .fill-red { background: linear-gradient(90deg, #ff0055, #ff5500); }
+    .fill-blue { background: linear-gradient(90deg, #0055ff, #00d2ff); }
+    .fill-yellow { background: linear-gradient(90deg, #ffaa00, #ffdd00); }
+
+    button { background: #007bff; color: white; border: none; padding: 10px 15px; font-size: 14px; font-weight: bold; border-radius: 6px; cursor: pointer; margin: 3px; text-transform: uppercase; }
+    button.danger { background: #dc3545; }
+    button.play { background: #00ff88; color: #000; }
+    
+    table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 12px;}
+    th, td { border-bottom: 1px solid #333; padding: 8px; text-align: left; }
+    th { color: #888; text-transform: uppercase; }
+    .info-footer { font-size: 11px; color: #666; margin-top: 10px; }
+
+    #replayControls { display: none; margin-top: 15px; text-align: left; background: #111; padding: 15px; border-radius: 8px;}
+    input[type=range] { width: 100%; margin: 10px 0; accent-color: #00ff88; }
+    
+    .chart-container { margin-top: 10px; }
+    .chart-label { font-size: 10px; color: #888; text-align: left; margin-top: 5px; }
+    canvas { background: #1e1e1e; border-radius: 5px; border: 1px solid #333; width: 100%; height: 80px; display: block; }
+
+    .dev-footer { margin-top: 25px; padding: 12px; font-size: 11px; color: #777; letter-spacing: 1px; border-top: 1px dashed #333; text-transform: uppercase; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <button class="btn-restart-top" onclick="restartDevice()">RESTART</button>
+    
+    <h2>DASHBOARD <span id="logStatus" style="font-size:12px; color:#00ff88; margin-left: 10px;">LIVE</span></h2>
+    
+    <div class="sys-stats">
+      <div class="stat-item">RAM: <span id="ramUsage">0%</span></div>
+      <div class="stat-item">ROM: <span id="romUsage">0%</span></div>
+      <div class="stat-item">CPU: <span id="cpuUsage">Low</span></div>
+    </div>
+
+    <div class="gauge-container">
+      <svg viewBox="0 0 100 55" class="gauge-svg">
+        <path d="M 10 50 A 40 40 0 0 1 90 50" class="gauge-bg" />
+        <path id="speed-gauge" d="M 10 50 A 40 40 0 0 1 90 50" class="gauge-value" />
+      </svg>
+      <div class="speed-text-container">
+        <div class="speed-val" id="spd">0</div>
+        <div class="speed-unit">KM/H</div>
+      </div>
+    </div>
+
+    <div class="grid">
+      <div class="box">
+        <div class="box-header"><span>Top Speed</span><span id="max">0.0</span></div>
+        <div class="linear-bar-bg"><div id="bar-max" class="linear-bar-fill fill-red"></div></div>
+      </div>
+      <div class="box">
+        <div class="box-header"><span>Avg Speed</span><span id="avg">0.0</span></div>
+        <div class="linear-bar-bg"><div id="bar-avg" class="linear-bar-fill fill-blue"></div></div>
+      </div>
+      <div class="box">
+        <div class="box-header"><span>Altitude (m)</span><span id="alt">0</span></div>
+        <div class="linear-bar-bg"><div id="bar-alt" class="linear-bar-fill fill-yellow"></div></div>
+      </div>
+      <div class="box">
+        <div class="box-header">
+          <span>Satelit <span style="font-size:9px; color:#666;">(NAVSTAR)</span></span>
+          <span id="sat">0</span>
+        </div>
+        <div class="linear-bar-bg"><div id="bar-sat" class="linear-bar-fill fill-green" style="background:#00ff88;"></div></div>
+      </div>
+    </div>
+
+    <div class="info-footer">
+      <div>LAT: <span id="lat" style="color:#fff;">0.0</span> | LON: <span id="lon" style="color:#fff;">0.0</span></div>
+      <div style="margin-top:5px;">TIME: <span id="time" style="color:#fff;">--:--:--</span> | DATE: <span id="date" style="color:#fff;">--/--/----</span></div>
+    </div>
+
+    <div id="replayControls">
+      <div style="font-size: 12px; color: #00d2ff; font-weight: bold; margin-bottom: 5px;">TELEMETRY REPLAY ANALYZER</div>
+      
+      <div class="chart-container">
+        <div class="chart-label">SPEED (KM/H)</div>
+        <canvas id="speedChart" height="80"></canvas>
+      </div>
+      
+      <div class="chart-container">
+        <div class="chart-label">ALTITUDE (M)</div>
+        <canvas id="altChart" height="80"></canvas>
+      </div>
+
+      <input type="range" id="timeSlider" min="0" max="100" value="0" style="margin-top: 15px;">
+      <button class="danger" onclick="stopReplay()" style="width: 100%;">STOP REPLAY</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>LOGGER CONTROL</h2>
+    <div id="recControlArea" style="margin-bottom: 15px;">
+      <button class="play" id="startRecBtn" onclick="cmd('/startlog')">REC START</button>
+    </div>
+    
+    <table id="fileTable"><tr><th>File</th><th>Size</th><th>Action</th></tr></table>
+  </div>
+
+  <div class="dev-footer">
+    Developed by Ludovic Abimanyu A.K.A Penyu
+  </div>
+
+  <script>
+    let liveInterval = setInterval(updateLive, 1000);
+    let replayInterval = null;
+    let isReplaying = false;
+    let currentReplayData = [];
+    let replayIndex = 0;
+
+    function renderUI(d) {
+      document.getElementById('spd').innerText = Math.round(d.spd);
+      let spdVal = parseFloat(d.spd);
+      let spdPct = Math.min(spdVal / 200, 1); 
+      let gaugeEl = document.getElementById('speed-gauge');
+      gaugeEl.style.strokeDashoffset = 126 - (spdPct * 126);
+      gaugeEl.style.stroke = spdVal > 100 ? "#ff0055" : "#00ff88";
+
+      document.getElementById('max').innerText = d.max;
+      document.getElementById('avg').innerText = d.avg;
+      document.getElementById('alt').innerText = d.alt;
+      document.getElementById('sat').innerText = d.sat;
+      document.getElementById('lat').innerText = d.lat;
+      document.getElementById('lon').innerText = d.lon;
+      document.getElementById('time').innerText = d.time;
+      document.getElementById('date').innerText = d.date;
+
+      document.getElementById('ramUsage').innerText = d.ram + '%';
+      document.getElementById('romUsage').innerText = d.rom + '%';
+      document.getElementById('cpuUsage').innerText = d.cpu;
+
+      document.getElementById('bar-max').style.width = Math.min((parseFloat(d.max)/200)*100, 100) + '%';
+      document.getElementById('bar-avg').style.width = Math.min((parseFloat(d.avg)/200)*100, 100) + '%';
+      document.getElementById('bar-alt').style.width = Math.min((parseFloat(d.alt)/2000)*100, 100) + '%'; 
+      document.getElementById('bar-sat').style.width = Math.min((parseInt(d.sat)/12)*100, 100) + '%'; 
+    }
+    
+    function drawCharts(dataArray, currentIndex) {
+      drawSingleChart('speedChart', dataArray, currentIndex, 4, '#00ff88');
+      drawSingleChart('altChart', dataArray, currentIndex, 7, '#ffaa00');
+    }
+
+    function drawSingleChart(canvasId, dataArray, currentIndex, colIdx, strokeColor) {
+      const canvas = document.getElementById(canvasId);
+      if(!canvas) return;
+      const ctx = canvas.getContext('2d');
+      
+      if(canvas.width !== canvas.parentElement.clientWidth) {
+          canvas.width = canvas.parentElement.clientWidth;
+      }
+      const w = canvas.width;
+      const h = canvas.height;
+
+      ctx.clearRect(0, 0, w, h);
+
+      let maxVal = 10;
+      dataArray.forEach(row => {
+        let v = parseFloat(row[colIdx]);
+        if(v > maxVal) maxVal = v;
+      });
+
+      ctx.beginPath();
+      ctx.strokeStyle = strokeColor;
+      ctx.lineWidth = 2;
+      for(let i=0; i<dataArray.length; i++) {
+        let x = (i / (dataArray.length - 1)) * w;
+        let y = h - ((parseFloat(dataArray[i][colIdx]) / maxVal) * (h - 10)) - 5;
+        if(i===0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+
+      if(currentIndex >= 0 && dataArray.length > 1) {
+        let px = (currentIndex / (dataArray.length - 1)) * w;
+        ctx.beginPath();
+        ctx.strokeStyle = '#ff0055';
+        ctx.lineWidth = 2;
+        ctx.moveTo(px, 0);
+        ctx.lineTo(px, h);
+        ctx.stroke();
+        
+        ctx.fillStyle = '#fff';
+        ctx.font = '10px Arial';
+        ctx.fillText(Math.round(dataArray[currentIndex][colIdx]), px > w - 30 ? px - 30 : px + 5, 12);
+      }
+    }
+
+    function updateLive() {
+      if(isReplaying) return;
+      fetch('/data').then(r => r.json()).then(data => {
+        renderUI(data);
+        let statusEl = document.getElementById('logStatus');
+        let recArea = document.getElementById('recControlArea');
+        
+        if(data.isLogging) {
+          statusEl.innerText = "RECORDING";
+          statusEl.style.color = "#ff0055";
+          recArea.innerHTML = `<button class="danger" onclick="cmd('/stoplog')" style="width: 100%;">REC STOP</button>`;
+        } else {
+          statusEl.innerText = "LIVE";
+          statusEl.style.color = "#00ff88";
+          recArea.innerHTML = `<button class="play" id="startRecBtn" onclick="cmd('/startlog')">REC START</button>`;
+        }
+      });
+    }
+
+    function cmd(url) { fetch(url).then(() => { loadFiles(); updateLive(); }); }
+
+    function loadFiles() {
+      fetch('/files').then(r => r.json()).then(files => {
+        let html = '<tr><th>File Name</th><th>Size</th><th>Action</th></tr>';
+        if(files.length === 0) {
+          html += `<tr><td colspan="3" style="text-align:center; color:#777;">Tidak ada file log tersimpan</td></tr>`;
+        } else {
+          files.forEach(f => {
+            html += `<tr><td>${f.name}</td><td>${f.size}B</td>
+            <td>
+              <button class="play" style="padding: 5px 10px;" onclick="playReplay('${f.name}')">▶</button>
+              <a href="/download?file=${f.name}"><button style="padding: 5px 10px;">DL</button></a>
+              <button class="danger" style="padding: 5px 10px;" onclick="cmd('/delete?file=${f.name}')">X</button>
+            </td></tr>`;
+          });
+        }
+        document.getElementById('fileTable').innerHTML = html;
+      });
+    }
+    
+    function restartDevice() {
+      if(confirm("Yakin ingin merestart perangkat ESP8266?")) {
+        fetch('/restart').then(() => {
+          alert("Perangkat sedang restart...");
+        });
+      }
+    }
+
+    function processReplayFrame() {
+      document.getElementById('timeSlider').value = replayIndex;
+      let row = currentReplayData[replayIndex];
+      let d = {
+        date: row[0], time: row[1], lat: row[2], lon: row[3],
+        spd: row[4], max: row[5], avg: row[6], alt: row[7],
+        sat: row[10], ram: 0, rom: 0, cpu: 'Replay'
+      };
+      renderUI(d);
+      drawCharts(currentReplayData, replayIndex);
+    }
+
+    function playReplay(fileName) {
+      clearInterval(liveInterval); 
+      isReplaying = true;
+      document.getElementById('logStatus').innerText = "REPLAYING";
+      document.getElementById('logStatus').style.color = "#00d2ff";
+      
+      fetch('/view?file=' + fileName)
+        .then(response => response.text())
+        .then(csv => {
+          let lines = csv.split('\n').filter(line => line.trim().length > 0);
+          if(lines.length <= 1) { alert("Log kosong!"); stopReplay(); return; }
+          
+          currentReplayData = [];
+          for(let i=1; i<lines.length; i++){ currentReplayData.push(lines[i].split(',')); }
+          
+          replayIndex = 0;
+          document.getElementById('replayControls').style.display = 'block';
+          let slider = document.getElementById('timeSlider');
+          slider.max = currentReplayData.length - 1;
+          slider.value = 0;
+
+          if(replayInterval) clearInterval(replayInterval);
+          
+          processReplayFrame();
+
+          replayInterval = setInterval(() => {
+            replayIndex++;
+            if(replayIndex >= currentReplayData.length) { 
+              stopReplay(); alert("Replay Selesai"); return; 
+            }
+            processReplayFrame();
+          }, 1000); 
+        });
+    }
+
+    document.getElementById('timeSlider').addEventListener('input', function() {
+      replayIndex = parseInt(this.value);
+      processReplayFrame();
+    });
+
+    function stopReplay() {
+      if(replayInterval) clearInterval(replayInterval);
+      isReplaying = false;
+      document.getElementById('replayControls').style.display = "none";
+      document.getElementById('logStatus').innerText = "LIVE";
+      document.getElementById('logStatus').style.color = "#00ff88";
+      liveInterval = setInterval(updateLive, 1000); 
+    }
+    
+    window.onload = loadFiles;
+  </script>
+</body>
+</html>
+)rawliteral";
+
+// =========================================================================
+// FUNGSI WEB SERVER ROUTING & STATS SYSTEM
+// =========================================================================
+void handleRoot() { server.send(200, "text/html", INDEX_HTML); }
+
+void handleData() {
+  double currentSpeed = gps.speed.kmph();
+  double currentAlt = gps.altitude.isValid() ? gps.altitude.meters() : 0;
+  int sats = gps.satellites.value();
+
+  int signalBar = 0;
+  if (sats >= 3) signalBar = 1;
+  if (sats >= 5) signalBar = 2;
+  if (sats >= 7) signalBar = 3;
+  if (sats >= 9) signalBar = 4;
+
+  double currentAvg = speedCount > 0 ? (sumSpeed / speedCount) : 0.0;
+
+  uint32_t freeRam = ESP.getFreeHeap();
+  int ramUsagePct = ((81920 - freeRam) * 100) / 81920;
+
+  uint32_t totalSketchSize = ESP.getSketchSize();
+  uint32_t freeSketchSpace = ESP.getFreeSketchSpace();
+  uint32_t totalRom = totalSketchSize + freeSketchSpace;
+  int romUsagePct = (totalSketchSize * 100) / totalRom;
+
+  String cpuLoad = "Optimal";
+  if (millis() % 5000 < 1000) cpuLoad = "Normal";
+
+  String json = "{";
+  json += "\"spd\":\"" + String(currentSpeed, 1) + "\",";
+  json += "\"max\":\"" + String(topSpeed, 1) + "\",";
+  json += "\"avg\":\"" + String(currentAvg, 1) + "\",";
+  json += "\"alt\":\"" + String(currentAlt, 1) + "\",";
+  json += "\"maxAlt\":\"" + String(maxAltitude == -9999.0 ? 0 : maxAltitude, 1) + "\",";
+  json += "\"minAlt\":\"" + String(minAltitude == 9999.0 ? 0 : minAltitude, 1) + "\",";
+  json += "\"sat\":\"" + String(sats) + "\",";
+  json += "\"bar\":\"" + String(signalBar) + "\",";
+  json += "\"lat\":\"" + String(gps.location.lat(), 6) + "\",";
+  json += "\"lon\":\"" + String(gps.location.lng(), 6) + "\",";
+  json += "\"ram\":" + String(ramUsagePct) + ",";
+  json += "\"rom\":" + String(romUsagePct) + ",";
+  json += "\"cpu\":\"" + cpuLoad + "\",";
+  
+  int hour = gps.time.hour() + 7; int day = gps.date.day();
+  if (hour >= 24) { hour -= 24; day += 1; }
+  
+  char timeStr[9]; sprintf(timeStr, "%02d:%02d:%02d", hour, gps.time.minute(), gps.time.second());
+  char dateStr[11]; sprintf(dateStr, "%02d/%02d/%04d", day, gps.date.month(), gps.date.year());
+  
+  json += "\"time\":\"" + String(timeStr) + "\",";
+  json += "\"date\":\"" + String(dateStr) + "\",";
+  json += "\"isLogging\":" + String(isLogging ? "true" : "false") + ",";
+  json += "\"file\":\"" + currentLogFile + "\"";
+  json += "}";
+  server.send(200, "application/json", json);
+}
+
+void handleStartLog() {
+  char fname[30];
+  if (gps.date.isValid() && gps.time.isValid()) {
+    int hour = gps.time.hour() + 7; 
+    int day = gps.date.day(); 
+    if (hour >= 24) { hour -= 24; day += 1; }
+    sprintf(fname, "/log_%02d%02d%04d_%02d%02d.csv", day, gps.date.month(), gps.date.year(), hour, gps.time.minute());
+  } else {
+    sprintf(fname, "/log_%lu.csv", millis());
+  }
+  
+  currentLogFile = String(fname);
+  Serial.print("Mencoba membuat file log: ");
+  Serial.println(currentLogFile);
+  
+  sumSpeed = 0.0;
+  speedCount = 0;
+  minAltitude = 9999.0;
+  maxAltitude = -9999.0;
+  
+  File f = LittleFS.open(currentLogFile, "w");
+  if (f) {
+    f.println("Date,Time,Latitude,Longitude,Speed(KMH),TopSpeed(KMH),AvgSpeed(KMH),Altitude(m),MaxAlt(m),MinAlt(m),Satellites,SignalBar");
+    f.close();
+    isLogging = true;
+    Serial.println("File log berhasil dibuat!");
+    server.send(200, "text/plain", "Logging Started: " + currentLogFile);
+  } else {
+    Serial.println("GAGAL membuat file di LittleFS! Partisi belum diformat atau salah ukuran Flash Size.");
+    isLogging = false;
+    server.send(500, "text/plain", "Error: Gagal membuat file. Cek partisi flash.");
+  }
+}
+
+void handleStopLog() {
+  isLogging = false; 
+  Serial.println("Logging dihentikan.");
+  currentLogFile = "";
+  server.send(200, "text/plain", "Logging Stopped");
+}
+
+void handleRestart() {
+  server.send(200, "text/plain", "Device Restarting...");
+  delay(500);
+  ESP.restart();
+}
+
+void handleListFiles() {
+  String json = "[";
+  Dir dir = LittleFS.openDir("/");
+  bool first = true;
+  while (dir.next()) {
+    if (dir.isFile()) {
+      if (!first) json += ",";
+      String fname = dir.fileName();
+      if (fname.startsWith("/")) fname = fname.substring(1); 
+      
+      File f = LittleFS.open("/" + fname, "r");
+      size_t fsize = f ? f.size() : 0;
+      if (f) f.close();
+
+      json += "{\"name\":\"" + fname + "\",\"size\":" + String(fsize) + "}";
+      first = false;
+    }
+  }
+  json += "]";
+  server.send(200, "application/json", json);
+}
+
+void handleView() {
+  if (server.hasArg("file")) {
+    String path = "/" + server.arg("file");
+    if (LittleFS.exists(path)) {
+      File file = LittleFS.open(path, "r");
+      server.streamFile(file, "text/plain"); 
+      file.close(); return;
+    }
+  }
+  server.send(404, "text/plain", "File Not Found");
+}
+
+void handleDownload() {
+  if (server.hasArg("file")) {
+    String path = "/" + server.arg("file");
+    if (LittleFS.exists(path)) {
+      File file = LittleFS.open(path, "r");
+      server.sendHeader("Content-Disposition", "attachment; filename=\"" + server.arg("file") + "\"");
+      server.streamFile(file, "text/csv");
+      file.close(); return;
+    }
+  }
+  server.send(404, "text/plain", "File Not Found");
+}
+
+void handleDelete() {
+  if (server.hasArg("file")) {
+    LittleFS.remove("/" + server.arg("file"));
+    server.send(200, "text/plain", "Deleted");
+  } else server.send(400, "text/plain", "Missing args");
+}
+
+void handleRename() {
+  if (server.hasArg("old") && server.hasArg("new")) {
+    LittleFS.rename("/" + server.arg("old"), "/" + server.arg("new"));
+    server.send(200, "text/plain", "Renamed");
+  } else server.send(400, "text/plain", "Missing args");
+}
+
+// =========================================================================
+// FUNGSI OLED & LOGGER
+// =========================================================================
+void setOLEDContrast(uint8_t contrast) {
+  Wire.beginTransmission(0x3C);
+  Wire.write(0x00); Wire.write(0x81); Wire.write(contrast);
+  Wire.endTransmission();
+}
+
+void drawSignalBars(int satellites) {
+  int activeBars = 0;
+  if (satellites >= 3) activeBars = 1;
+  if (satellites >= 5) activeBars = 2;
+  if (satellites >= 7) activeBars = 3;
+  if (satellites >= 9) activeBars = 4;
+
+  for (int i = 0; i < activeBars; i++) {
+    int barHeight = 2 + (i * 2); 
+    display.fillRect(i * 5, 9 - barHeight, 3, barHeight, WHITE); 
+  }
+}
+
+void logGPSData() {
+  if (isLogging && millis() - lastLogTime >= 1000) { 
+    lastLogTime = millis();
+    File f = LittleFS.open(currentLogFile, "a");
+    if (f) {
+      int hour = gps.time.hour() + 7; int day = gps.date.day(); if (hour >= 24) { hour -= 24; day += 1; }
+      
+      double currentSpeed = gps.speed.kmph();
+      double currentAlt = gps.altitude.isValid() ? gps.altitude.meters() : 0.0;
+      int sats = gps.satellites.value();
+      
+      if(gps.altitude.isValid()) {
+        if(currentAlt > maxAltitude) maxAltitude = currentAlt;
+        if(currentAlt < minAltitude) minAltitude = currentAlt;
+      }
+      
+      sumSpeed += currentSpeed;
+      speedCount++;
+      double avgSpeed = sumSpeed / speedCount;
+
+      int signalBar = 0;
+      if (sats >= 3) signalBar = 1; if (sats >= 5) signalBar = 2;
+      if (sats >= 7) signalBar = 3; if (sats >= 9) signalBar = 4;
+      
+      char logLine[150];
+      sprintf(logLine, "%02d/%02d/%04d,%02d:%02d:%02d,%.6f,%.6f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%d,%d", 
+              day, gps.date.month(), gps.date.year(), 
+              hour, gps.time.minute(), gps.time.second(),
+              gps.location.lat(), gps.location.lng(), 
+              currentSpeed, topSpeed, avgSpeed, 
+              currentAlt, (maxAltitude == -9999.0 ? 0 : maxAltitude), (minAltitude == -9999.0 ? 0 : minAltitude), 
+              sats, signalBar);
+              
+      f.println(logLine); f.close();
+    }
+  }
+}
+
+// =========================================================================
+// SETUP
+// =========================================================================
+void setup() {
+  Serial.begin(115200);
+  ss.begin(GPSBaud);
+  Wire.begin(D2, D1);
+
+  if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+    Serial.println(F("Gagal menyalakan OLED")); for(;;);
+  }
+
+  if (!LittleFS.begin()) {
+    Serial.println("LittleFS gagal dimount, melakukan format otomatis...");
+    if (LittleFS.format()) {
+      Serial.println("LittleFS berhasil diformat.");
+      LittleFS.begin();
+    } else {
+      Serial.println("GAGAL memformat LittleFS! Periksa pengaturan Flash Size di Arduino IDE.");
+    }
+  } else {
+    Serial.println("LittleFS berhasil dimount.");
+  }
+
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP(ssid, password);
+  
+  server.on("/", handleRoot);
+  server.on("/data", handleData);
+  server.on("/startlog", handleStartLog);
+  server.on("/stoplog", handleStopLog);
+  server.on("/restart", handleRestart);
+  server.on("/files", handleListFiles);
+  server.on("/view", handleView);
+  server.on("/download", handleDownload);
+  server.on("/delete", handleDelete);
+  server.on("/rename", handleRename);
+  server.begin();
+
+  stateTimer = millis();
+}
+
+// =========================================================================
+// LOOP UTAMA
+// =========================================================================
+void loop() {
+  while (ss.available() > 0) gps.encode(ss.read());
+
+  server.handleClient();
+  logGPSData();
+  
+  int sats = gps.satellites.value();
+
+  if (sats >= 3) {
+    double tempSpeed = gps.speed.kmph();
+    if (tempSpeed < 1.0) tempSpeed = 0.0;
+    if (tempSpeed > topSpeed) topSpeed = tempSpeed;
+
+    if (gps.altitude.isValid()) {
+      double currentAlt = gps.altitude.meters();
+      if (millis() - lastAltTime > 2000) {
+        if (currentAlt > lastAltitude + 0.5) altTrend = 24;      
+        else if (currentAlt < lastAltitude - 0.5) altTrend = 25; 
+        else altTrend = '-';                                     
+        lastAltitude = currentAlt; lastAltTime = millis();
+      }
+    }
+  }
+
+  switch (currentState) {
+    case STATE_BOOTING: {
+      display.clearDisplay(); display.setTextColor(WHITE); display.setTextSize(1);
+      display.setCursor(15, 10); display.print("System Booting...");
+
+      unsigned long elapsed = millis() - stateTimer;
+      int progressWidth = map(elapsed, 0, 1500, 0, 100);
+      if (progressWidth > 100) progressWidth = 100;
+
+      display.drawRect(14, 30, 100, 12, WHITE);
+      display.fillRect(16, 32, progressWidth - 4, 8, WHITE);
+      display.display();
+
+      if (elapsed >= 1500) {
+        currentState = STATE_WELCOME; stateTimer = millis(); setOLEDContrast(0); 
+      }
+      break;
+    }
+
+    case STATE_WELCOME: {
+      unsigned long elapsed = millis() - stateTimer;
+      display.clearDisplay();
+      display.drawBitmap(0, 0, epd_bitmap_PENYUPUTIH, 128, 64, WHITE);
+      display.display();
+
+      if (elapsed <= 2000) {
+        setOLEDContrast(map(elapsed, 0, 2000, 0, 255));
+      } else if (elapsed >= 3000) {
+        setOLEDContrast(255); currentState = STATE_TITLE; stateTimer = millis();
+      }
+      break;
+    }
+
+    case STATE_TITLE: {
+      display.clearDisplay(); display.setTextSize(2);
+      display.setCursor(45, 10); display.print("GPS");
+      display.setTextSize(1); display.setCursor(30, 32); display.print("SPEEDOMETER");
+      display.setCursor(28, 48); display.print("Satuan: KM/H");
+      display.display();
+
+      if (millis() - stateTimer >= 2500) {
+        currentState = STATE_CONNECTING; lastDisplayUpdate = millis();
+      }
+      break;
+    }
+
+    case STATE_CONNECTING: {
+      if (millis() - lastDisplayUpdate > 80) { 
+        lastDisplayUpdate = millis(); display.clearDisplay(); display.setTextSize(1);
+        display.setCursor(18, 0); display.print("Mencari Sinyal");
+        
+        int cx = 64, cy = 28; 
+        int r1 = (millis() / 40) % 20; 
+        int r2 = (r1 + 10) % 20; 
+        
+        display.fillCircle(cx, cy, 2, WHITE); 
+        display.drawCircle(cx, cy, r1, WHITE);
+        display.drawCircle(cx, cy, r2, WHITE);
+
+        display.setCursor(10, 52); display.print("Satelit Ditemukan: "); display.print(sats);
+        display.display();
+      }
+      if (sats >= 3) { currentState = STATE_SPEEDOMETER; lastMoveTime = millis(); }
+      break;
+    }
+
+    case STATE_SPEEDOMETER: {
+      double currentSpeed = gps.speed.kmph();
+      if (currentSpeed < 1.0) currentSpeed = 0.0;
+
+      if (currentSpeed > 0.0) lastMoveTime = millis(); 
+      else if (millis() - lastMoveTime > 4000) {
+        currentState = STATE_SCREENSAVER; screensaverStartTime = millis(); 
+        display.clearDisplay(); break;
+      }
+
+      if (millis() - lastDisplayUpdate > 100) {
+        lastDisplayUpdate = millis(); display.clearDisplay();
+
+        if (sats < 3) { currentState = STATE_CONNECTING; break; }
+
+        int hour = gps.time.hour() + 7; int day = gps.date.day(); int month = gps.date.month();
+        if (hour >= 24) { hour -= 24; day += 1; }
+
+        char timeString[6]; char dateString[6];
+        sprintf(timeString, "%02d:%02d", hour, gps.time.minute());
+        sprintf(dateString, "%02d/%02d", day, month);
+
+        drawSignalBars(sats); display.setTextSize(1);
+        display.setCursor(45, 1); if (gps.time.isValid()) display.print(timeString); else display.print("--:--");
+        display.setCursor(92, 1); display.print("Sat:"); display.print(sats);
+        display.drawLine(0, 11, 128, 11, WHITE); 
+
+        int speedInt = (int)currentSpeed; display.setTextSize(5); 
+
+        if (speedInt < 10) {
+          display.setCursor(25, 20); display.print(speedInt);
+
+          int rightX = 95; display.setTextSize(1); 
+          display.setCursor(rightX, 14); display.print("MAX");
+          display.setCursor(rightX, 23); display.print((int)topSpeed);
+
+          display.setCursor(rightX, 34); display.print("MDPL");
+          display.setCursor(rightX, 43);
+          if (gps.altitude.isValid()) { display.print(altTrend); display.print((int)gps.altitude.meters()); } else display.print("-");
+          display.setCursor(rightX, 54);
+          if (gps.date.isValid()) display.print(dateString); else display.print("--/--");
+
+        } else {
+          if (speedInt < 100) display.setCursor(34, 20); else display.setCursor(19, 20);
+          display.print(speedInt);
+        }
+        display.display();
+      }
+      break;
+    }
+
+    case STATE_SCREENSAVER: {
+      double currentSpeed = gps.speed.kmph();
+      if (currentSpeed < 1.0) currentSpeed = 0.0;
+      
+      if (currentSpeed > 0.0) {
+        lastMoveTime = millis(); setOLEDContrast(255); currentState = STATE_SPEEDOMETER;
+        display.clearDisplay(); break;
+      }
+
+      if (millis() - screensaverStartTime > 24000) {
+        currentState = STATE_SLEEP; display.clearDisplay();
+        display.ssd1306_command(SSD1306_DISPLAYOFF); break;
+      }
+
+      if (millis() - lastDisplayUpdate > 200) { 
+        lastDisplayUpdate = millis(); display.clearDisplay();
+
+        if (sats < 3) { currentState = STATE_CONNECTING; break; }
+
+        int hour = gps.time.hour() + 7; int day = gps.date.day(); int month = gps.date.month();
+        if (hour >= 24) { hour -= 24; day += 1; }
+
+        char timeString[6]; char dateStringLong[11]; char dateStringShort[6];
+        sprintf(timeString, "%02d:%02d", hour, gps.time.minute());
+        sprintf(dateStringLong, "%02d/%02d/%04d", day, month, gps.date.year());
+        sprintf(dateStringShort, "%02d/%02d", day, month);
+
+        unsigned long carouselTimer = (millis() - screensaverStartTime) % 12000;
+        int page = carouselTimer / 3000; 
+
+        if (page == 0) display.drawBitmap(0, 0, epd_bitmap_PENYUPUTIH, 128, 64, WHITE);
+        else if (page == 1) {
+          drawSignalBars(sats); display.setTextSize(1); display.setCursor(92, 1); display.print("Sat:"); display.print(sats);
+          display.drawLine(0, 11, 128, 11, WHITE);
+          display.setTextSize(3); display.setCursor(19, 20); if (gps.time.isValid()) display.print(timeString); else display.print("--:--");
+          display.setTextSize(1); display.setCursor(35, 52); if (gps.date.isValid()) display.print(dateStringLong); else display.print("--/--/----");
+        } 
+        else if (page == 2) {
+          display.setTextSize(2); display.setCursor(0, 5); display.print("Alt:");
+          if (gps.altitude.isValid()) display.print((int)gps.altitude.meters()); else display.print("-"); display.print(" m");
+          display.setTextSize(1); display.setCursor(0, 32); display.print("Lat: ");
+          if (gps.location.isValid()) display.print(gps.location.lat(), 6); else display.print("Mencari...");
+          display.setCursor(0, 48); display.print("Lon: ");
+          if (gps.location.isValid()) display.print(gps.location.lng(), 6); else display.print("Mencari...");
+        }
+        else if (page == 3) {
+          drawSignalBars(sats); display.setTextSize(1); display.setCursor(45, 1); 
+          if (gps.time.isValid()) display.print(timeString); else display.print("--:--");
+          display.setCursor(92, 1); display.print("Sat:"); display.print(sats);
+          display.drawLine(0, 11, 128, 11, WHITE); 
+
+          display.setTextSize(5); display.setCursor(25, 20); display.print((int)currentSpeed); 
+
+          int rightX = 95; display.setTextSize(1); 
+          display.setCursor(rightX, 14); display.print("MAX"); display.setCursor(rightX, 23); display.print((int)topSpeed);
+          display.setCursor(rightX, 34); display.print("MDPL"); display.setCursor(rightX, 43);
+          if (gps.altitude.isValid()) { display.print(altTrend); display.print((int)gps.altitude.meters()); } else display.print("-");
+          display.setCursor(rightX, 54); if (gps.date.isValid()) display.print(dateStringShort); else display.print("--/--");
+        }
+        display.display();
+      }
+      break;
+    }
+
+    case STATE_SLEEP: {
+      double currentSpeed = gps.speed.kmph();
+      if (currentSpeed < 1.0) currentSpeed = 0.0;
+
+      if (currentSpeed > 0.0) {
+        lastMoveTime = millis(); display.ssd1306_command(SSD1306_DISPLAYON); 
+        setOLEDContrast(255); currentState = STATE_SPEEDOMETER; display.clearDisplay();
+      }
+      break;
+    }
+  }
+}
