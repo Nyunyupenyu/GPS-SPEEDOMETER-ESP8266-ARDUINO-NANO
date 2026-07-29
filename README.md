@@ -1,59 +1,106 @@
-# GPS-SPEEDOMETER-ESP8266-ARDUINO-NANO
-SPEEDOMETER BASED ON GPS 
+1. Navigasi & Tampilan Layar OLED
+Menu Booting & Welcome: Menampilkan animasi logo penyu dan proses booting saat perangkat pertama kali dinyalakan.
 
-BOARD ESP8266 
-GPS 6M 
-OLED SSD1306
-CABLE JUMPER 8X
-BREADBOARD 1X
+Status Mencari Sinyal (STATE_CONNECTING): Otomatis aktif saat jumlah satelit kurang dari 3. Layar menampilkan animasi radar pencarian dan jumlah satelit secara real-time.
 
-FEATURES:
-  - SPEEDOMETER (KM/H)
-  - ALTITUDE (MDPL)
-  - TOP SPEED LOGGER
-  - GPS SIGNAL / DATE / TIME
-    
-SEE THE DIAGRAM OR SCHEMATIC IN PHOTOS 
-CODING AVAILABLE 
+Speedometer Utama: Menampilkan kecepatan saat ini (KM/H), kecepatan maksimum (Top Speed), altitudo (MDPL) dengan tren naik/turun, jumlah satelit, tanggal, dan jam lokal secara real-time.
 
-1. Rangkaian Kabel (Wiring)
-Siapkan kabel jumper secukupnya. Pastikan ESP8266 dalam keadaan tidak tersambung ke listrik/komputer saat merangkai.
+Auto Screen Saver & Sleep: Layar akan masuk ke mode screensaver (menampilkan carousel halaman logo, koordinat, status daya/suhu) jika kendaraan diam lebih dari 4 detik, dan masuk mode sleep total setelah 30 detik (jika tidak dimatikan).
 
-Modul OLED SSD1306 (Layar) ke ESP8266:
+2. Kontrol Tombol Fisik (One Button Key pada Pin D3)
+Semua fungsi kontrol cepat dapat diakses menggunakan satu tombol tactile dengan indikator pop-up notifikasi di layar OLED:
 
-VCC (OLED) -> 3V3 (ESP8266)
+1x Klik:
 
-GND (OLED) -> GND (ESP8266)
+Fungsi: Membangunkan layar (Wake Up) jika perangkat sedang dalam mode screensaver atau sleep.
 
-SCL (OLED) -> D1 (ESP8266)
+Feedback: Buzzer bunyi 1x pendek, layar memunculkan pop-up "WAKE UP".
 
-SDA (OLED) -> D2 (ESP8266)
+2x Klik:
 
-Modul GPS NEO-6M ke ESP8266:
+Fungsi: Menyalakan atau mematikan suara Buzzer (Mute).
 
-VCC (GPS) -> 3V3 (ESP8266) (Catatan: Jika GPS tidak menyala atau tidak mendapat sinyal, coba pindahkan ke pin VIN atau 5V karena beberapa modul butuh daya lebih besar).
+Feedback: Layar memunculkan pop-up "BUZZER ON" atau "BUZZER OFF".
 
-GND (GPS) -> GND (ESP8266)
+3x Klik:
 
-TX (GPS) -> D6 (ESP8266)
+Fungsi: Toggle Rekam Data Log GPS (Start/Stop Logging secara instan tanpa buka web).
 
-RX (GPS) -> D7 (ESP8266)
+Feedback:
 
-2. Persiapan Software (Arduino IDE)
-Sebelum menempelkan kode, Arduino IDE butuh "buku panduan" (Library) agar tahu cara membaca GPS dan menggambar di layar OLED.
+Saat mulai: Beep 3x dengan frekuensi tinggi 2000Hz, pop-up "LOG START".
 
-Langkah Instalasi Library:
+Saat berhenti: Beep 3x dengan frekuensi rendah 500Hz, pop-up "LOG STOP".
 
-Buka Arduino IDE.
+5x Klik:
 
-Pergi ke menu Sketch > Include Library > Manage Libraries...
+Fungsi: Mengaktifkan atau menonaktifkan fitur Auto Screen Saver.
 
-Di kolom pencarian (Search), ketik nama-nama di bawah ini dan klik Install pada hasil yang sesuai:
+Feedback: Layar memunculkan pop-up "SCR SAVER ON" atau "SCR SAVER OFF".
 
-TinyGPSPlus (oleh Mikal Hart) - Untuk membaca data satelit.
+Tahan 3 Detik (Long Press):
 
-Adafruit GFX Library (oleh Adafruit) - Untuk menggambar teks/grafis.
+Fungsi: Menyalakan atau mematikan WiFi ESP8266 (Mode Hemat Baterai).
 
-Adafruit SSD1306 (oleh Adafruit) - Untuk mengontrol layar OLED.
+Feedback: Layar memunculkan pop-up "WIFI ON" atau "WIFI OFF".
 
-(Opsional) Jika saat menginstal Adafruit SSD1306 muncul kotak peringatan untuk menginstal dependensi tambahan (seperti Adafruit BusIO), klik Install All.
+3. Web Dashboard (IoT via Wi-Fi)
+Cara Akses:
+
+Nyalakan perangkat, sambungkan HP atau laptop Anda ke jaringan WiFi bernama RACE_PANEL_PENYU (Password: masuk123).
+
+Buka browser (Chrome/Safari) dan ketik alamat: http://192.168.4.1.
+
+Fitur pada Web Dashboard:
+
+Live Telemetry Dashboard: Memantau kecepatan secara real-time via gauge digital, statistik Top Speed, Avg Speed, Altitudo, Satelit, koordinat GPS, hingga status Voltase, Ampere, Suhu, serta penggunaan memori RAM/ROM ESP8266.
+
+Buzzer Settings: Mengatur status Buzzer (ON/OFF) dan mengubah slider frekuensi suara secara dinamis dari web.
+
+Logger Control: Tombol jarak jauh untuk memulai (REC START) atau menghentikan (REC STOP) perekaman data perjalanan.
+
+File Manager (.CSV): Melihat daftar file log yang tersimpan di memori LittleFS, mengunduh file log (DL), atau menghapusnya (X).
+
+Import & Replay Analyzer: Memungkinkan Anda mengunggah file log CSV dari perjalanan sebelumnya untuk diputar ulang (replay) lengkap dengan grafik visual pergerakan kecepatan dan altitudo.
+
+Tombol Restart: Merestart perangkat ESP8266 secara jarak jauh melalui web.
+
+
+📌 Skema Jalur Pin (Wiring) ESP8266
+1. OLED SSD1306 0.96"
+
+VCC ---> 3.3V (atau 5V)
+
+GND ---> GND
+
+SCL ---> D1 (GPIO 5)
+
+SDA ---> D2 (GPIO 4)
+
+2. Modul GPS NEO-6M
+
+VCC ---> 3.3V atau 5V
+
+GND ---> GND
+
+TX (GPS) ---> D5 (ESP8266)
+
+RX (GPS) ---> D6 (ESP8266)
+
+3. Buzzer
+
+Positif (+) ---> D8 (GPIO 15)
+
+Negatif (-) ---> GND
+
+4. Tactile Button (One Button Key)
+
+Kaki 1 ---> D3 (GPIO 0)
+
+Kaki 2 ---> GND (Bebas bolak-balik)
+
+💡 Catatan Jalur Power (Catu Daya):
+
+Semua pin GND dari OLED, GPS, Buzzer, dan Tombol dapat di-paralel (digabungkan) menuju ke pin GND di ESP8266.
+
+Semua pin VCC untuk OLED dan GPS dapat di-paralel menuju ke sumber daya 3.3V / 5V pada ESP8266.
