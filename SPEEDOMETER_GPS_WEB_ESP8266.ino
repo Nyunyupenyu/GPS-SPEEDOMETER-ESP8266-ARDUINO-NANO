@@ -1,7 +1,7 @@
 /*
- * Projek: Speedometer GPS IoT "Penyu" + Racing Dashboard & Telemetry Replay
- * Fitur: OLED UI (V2.14), WiFi AP, LittleFS Logger (Default Filename), Replay Multi-Chart, ESP8266 Stats
- * Hardware: ESP8266, GPS NEO-6M, OLED SSD1306 (0.96 Inch)
+ * Projek: Speedometer GPS IoT "Penyu" + Racing Dashboard + Power/Temp Monitor + Import Log
+ * Fitur Baru (V2.22): One Button Key (D3), 3x Klik (Toggle Log), 5x Klik (Toggle Screen Saver), Pop-up OLED Lengkap
+ * Hardware: ESP8266, GPS NEO-6M, OLED SSD1306, Tactile Button (D3), Buzzer (D8)
  */
 
 #include <Wire.h>
@@ -17,6 +17,7 @@
 const char* ssid = "RACE_PANEL_PENYU"; 
 const char* password = "masuk123";     
 ESP8266WebServer server(80);
+bool isWiFiEnabled = true; // Status awal WiFi menyala
 
 // --- KONFIGURASI PORT (PIN) ---
 #define SCREEN_WIDTH 128
@@ -26,6 +27,8 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 static const int RXPin = D5; 
 static const int TXPin = D6; 
+static const int BuzzerPin = D8; 
+static const int ButtonPin = D3; // Pin untuk Tactile Button di D3 (GPIO 0)
 static const uint32_t GPSBaud = 9600;
 
 TinyGPSPlus gps;
@@ -43,25 +46,52 @@ unsigned long lastDisplayUpdate = 0;
 unsigned long lastMoveTime = 0; 
 unsigned long screensaverStartTime = 0; 
 
+// Variabel Fitur Auto Screen Saver
+bool isScreenSaverEnabled = true;
+
+// Variabel Notifikasi Pop-up Layar
+String popupMsg = "";
+unsigned long popupTimer = 0;
+const unsigned long POPUP_DURATION = 2000; // Tampil 2 detik
+
+// Variabel Kontrol Tombol (One Button Key)
+unsigned long buttonPressTime = 0;
+unsigned long lastClickTime = 0;
+int clickCount = 0;
+bool lastButtonState = HIGH; 
+bool longPressHandled = false;
+
 // Variabel Memori Global & Statistik
 double topSpeed = 0.0;
 double lastAltitude = 0.0;
 char altTrend = '-'; 
 unsigned long lastAltTime = 0;
-
 double minAltitude = 9999.0;
 double maxAltitude = -9999.0;
 double sumSpeed = 0.0;
 unsigned long speedCount = 0;
 
-// Variabel Logger
+// Variabel Logger & Upload
 bool isLogging = false;
 String currentLogFile = "";
 unsigned long lastLogTime = 0;
+File fsUploadFile; 
+
+// Variabel Kontrol Buzzer
+bool buzzerEnabled = true;
+int buzzerFreq = 500; 
+
+// Variabel Kontrol Sinyal
+unsigned long lastBuzzerAlertTime = 0;
+bool lastConnectionState = false;
+
+// --- DATA TELEMETRI DAYA & SUHU (Simulasi / Sensor) ---
+float currentVoltage = 12.4; 
+float currentAmpere = 0.85;  
+float moduleTemp = 38.5;     
 
 // --- DATA GAMBAR LOGO PENYU (128x64) ---
 const unsigned char epd_bitmap_PENYUPUTIH [] PROGMEM = {
-  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
@@ -117,13 +147,72 @@ const unsigned char epd_bitmap_PENYUPUTIH [] PROGMEM = {
   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
-  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
-  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
-  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
-  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
-  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
 };
+
+// =========================================================================
+// FUNGSI HELPER
+// =========================================================================
+void buzzerBeep(int times, int durationMs, int pauseMs) {
+  if (!buzzerEnabled) return;
+  for (int i = 0; i < times; i++) {
+    tone(BuzzerPin, buzzerFreq);
+    delay(durationMs);
+    noTone(BuzzerPin);
+    if (i < times - 1) delay(pauseMs);
+  }
+}
+
+// Fungsi paksa Beep mengabaikan mute dengan frekuensi custom
+void customBeep(int times, int durationMs, int pauseMs, int freq) {
+  for (int i = 0; i < times; i++) {
+    tone(BuzzerPin, freq);
+    delay(durationMs);
+    noTone(BuzzerPin);
+    if (i < times - 1) delay(pauseMs);
+  }
+}
+
+// Fungsi untuk memicu pop-up notifikasi di layar
+void showPopup(String msg) {
+  popupMsg = msg;
+  popupTimer = millis();
+}
+
+// =========================================================================
+// FUNGSI SISTEM LOGGER (Internal)
+// =========================================================================
+void startLoggerSystem() {
+  char fname[30];
+  if (gps.date.isValid() && gps.time.isValid()) {
+    int hour = gps.time.hour() + 7; 
+    int day = gps.date.day(); 
+    if (hour >= 24) { hour -= 24; day += 1; }
+    sprintf(fname, "/log_%02d%02d%04d_%02d%02d.csv", day, gps.date.month(), gps.date.year(), hour, gps.time.minute());
+  } else {
+    sprintf(fname, "/log_%lu.csv", millis());
+  }
+  
+  currentLogFile = String(fname);
+  sumSpeed = 0.0;
+  speedCount = 0;
+  minAltitude = 9999.0;
+  maxAltitude = -9999.0;
+  
+  File f = LittleFS.open(currentLogFile, "w");
+  if (f) {
+    f.println("Date,Time,Latitude,Longitude,Speed(KMH),TopSpeed(KMH),AvgSpeed(KMH),Altitude(m),MaxAlt(m),MinAlt(m),Satellites,SignalBar,Voltage(V),Current(A),Temp(C)");
+    f.close();
+    isLogging = true;
+  } else {
+    isLogging = false;
+  }
+}
+
+void stopLoggerSystem() {
+  isLogging = false; 
+  currentLogFile = "";
+}
 
 // =========================================================================
 // HTML & JAVASCRIPT WEB DASHBOARD
@@ -141,7 +230,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
     
     .btn-restart-top { position: absolute; top: 12px; right: 15px; background: #ff8800; color: #fff; border: none; padding: 5px 10px; font-size: 11px; font-weight: bold; border-radius: 4px; cursor: pointer; text-transform: uppercase; }
 
-    .sys-stats { display: flex; justify-content: space-around; background: #151515; padding: 8px; border-radius: 6px; margin-bottom: 12px; font-size: 11px; border: 1px dashed #333; }
+    .sys-stats { display: flex; justify-content: space-around; background: #151515; padding: 8px; border-radius: 6px; margin-bottom: 5px; font-size: 11px; border: 1px dashed #333; }
     .stat-item span { color: #00ff88; font-weight: bold; }
 
     .gauge-container { position: relative; width: 240px; height: 130px; margin: 10px auto 0; }
@@ -165,6 +254,8 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
     button { background: #007bff; color: white; border: none; padding: 10px 15px; font-size: 14px; font-weight: bold; border-radius: 6px; cursor: pointer; margin: 3px; text-transform: uppercase; }
     button.danger { background: #dc3545; }
     button.play { background: #00ff88; color: #000; }
+    button.toggle-on { background: #00ff88; color: #000; }
+    button.toggle-off { background: #dc3545; color: #fff; }
     
     table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 12px;}
     th, td { border-bottom: 1px solid #333; padding: 8px; text-align: left; }
@@ -173,6 +264,9 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
 
     #replayControls { display: none; margin-top: 15px; text-align: left; background: #111; padding: 15px; border-radius: 8px;}
     input[type=range] { width: 100%; margin: 10px 0; accent-color: #00ff88; }
+    
+    .setting-group { margin-top: 10px; text-align: left; font-size: 12px; background: #252525; padding: 10px; border-radius: 6px; }
+    .setting-group label { display: block; margin-bottom: 5px; color: #aaa; font-weight: bold; }
     
     .chart-container { margin-top: 10px; }
     .chart-label { font-size: 10px; color: #888; text-align: left; margin-top: 5px; }
@@ -187,7 +281,13 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
     
     <h2>DASHBOARD <span id="logStatus" style="font-size:12px; color:#00ff88; margin-left: 10px;">LIVE</span></h2>
     
-    <div class="sys-stats">
+    <div class="sys-stats" style="background: #1a1a1a;">
+      <div class="stat-item">VOLT: <span id="webVolt" style="color: #ffaa00;">0.0</span>V</div>
+      <div class="stat-item">AMP: <span id="webAmp" style="color: #ffaa00;">0.0</span>A</div>
+      <div class="stat-item">SUHU: <span id="webTemp" style="color: #ffaa00;">0.0</span>&deg;C</div>
+    </div>
+
+    <div class="sys-stats" style="margin-bottom: 12px;">
       <div class="stat-item">RAM: <span id="ramUsage">0%</span></div>
       <div class="stat-item">ROM: <span id="romUsage">0%</span></div>
       <div class="stat-item">CPU: <span id="cpuUsage">Low</span></div>
@@ -250,11 +350,30 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
   </div>
 
   <div class="card">
+    <h2>BUZZER SETTINGS</h2>
+    <div class="setting-group">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+        <span>Status Buzzer:</span>
+        <button id="buzzerToggleBtn" class="toggle-on" onclick="toggleBuzzerState()">ON</button>
+      </div>
+      <label for="freqRange">Frekuensi Suara: <span id="freqVal" style="color:#00ff88;">500</span> Hz</label>
+      <input type="range" id="freqRange" min="100" max="5000" step="100" value="500" oninput="updateFreqDisplay(this.value)" onchange="setBuzzerFreq(this.value)">
+    </div>
+  </div>
+
+  <div class="card">
     <h2>LOGGER CONTROL</h2>
     <div id="recControlArea" style="margin-bottom: 15px;">
       <button class="play" id="startRecBtn" onclick="cmd('/startlog')">REC START</button>
     </div>
     
+    <div style="background: #252525; padding: 10px; border-radius: 6px; margin-bottom: 15px; text-align: left;">
+      <span style="font-size: 12px; color: #aaa; font-weight: bold;">IMPORT LOG FILE (.CSV)</span><br>
+      <input type="file" id="fileInput" accept=".csv" style="margin-top: 5px; font-size: 12px; max-width: 100%;"><br>
+      <button class="play" onclick="uploadFile()" style="margin-top: 8px; padding: 5px 10px; font-size: 11px;">UPLOAD FILE</button>
+      <span id="uploadStatus" style="font-size: 11px; color: #00ff88; margin-left: 10px;"></span>
+    </div>
+
     <table id="fileTable"><tr><th>File</th><th>Size</th><th>Action</th></tr></table>
   </div>
 
@@ -290,12 +409,46 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       document.getElementById('romUsage').innerText = d.rom + '%';
       document.getElementById('cpuUsage').innerText = d.cpu;
 
+      document.getElementById('webVolt').innerText = d.volt;
+      document.getElementById('webAmp').innerText = d.amp;
+      document.getElementById('webTemp').innerText = d.temp;
+
       document.getElementById('bar-max').style.width = Math.min((parseFloat(d.max)/200)*100, 100) + '%';
       document.getElementById('bar-avg').style.width = Math.min((parseFloat(d.avg)/200)*100, 100) + '%';
       document.getElementById('bar-alt').style.width = Math.min((parseFloat(d.alt)/2000)*100, 100) + '%'; 
       document.getElementById('bar-sat').style.width = Math.min((parseInt(d.sat)/12)*100, 100) + '%'; 
+      
+      let btn = document.getElementById('buzzerToggleBtn');
+      if(d.buzzerState) {
+        btn.innerText = "ON";
+        btn.className = "toggle-on";
+      } else {
+        btn.innerText = "OFF";
+        btn.className = "toggle-off";
+      }
     }
     
+    function updateFreqDisplay(val) {
+      document.getElementById('freqVal').innerText = val;
+    }
+
+    function setBuzzerFreq(val) {
+      fetch('/setfreq?val=' + val);
+    }
+
+    function toggleBuzzerState() {
+      fetch('/togglebuzzer').then(r => r.json()).then(d => {
+        let btn = document.getElementById('buzzerToggleBtn');
+        if(d.state) {
+          btn.innerText = "ON";
+          btn.className = "toggle-on";
+        } else {
+          btn.innerText = "OFF";
+          btn.className = "toggle-off";
+        }
+      });
+    }
+
     function drawCharts(dataArray, currentIndex) {
       drawSingleChart('speedChart', dataArray, currentIndex, 4, '#00ff88');
       drawSingleChart('altChart', dataArray, currentIndex, 7, '#ffaa00');
@@ -365,6 +518,41 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       });
     }
 
+    function uploadFile() {
+      let fileInput = document.getElementById('fileInput');
+      let statusStr = document.getElementById('uploadStatus');
+      
+      if(fileInput.files.length === 0) {
+        statusStr.innerText = "Pilih file!";
+        statusStr.style.color = "#dc3545";
+        return;
+      }
+      
+      let file = fileInput.files[0];
+      let formData = new FormData();
+      formData.append("file", file, file.name);
+
+      statusStr.innerText = "Uploading...";
+      statusStr.style.color = "#ffaa00";
+
+      fetch('/upload', { method: 'POST', body: formData })
+        .then(response => {
+          if(response.ok) {
+            statusStr.innerText = "Sukses!";
+            statusStr.style.color = "#00ff88";
+            fileInput.value = ""; 
+            loadFiles(); 
+          } else {
+            statusStr.innerText = "Gagal!";
+            statusStr.style.color = "#dc3545";
+          }
+        })
+        .catch(error => {
+          statusStr.innerText = "Error!";
+          statusStr.style.color = "#dc3545";
+        });
+    }
+
     function cmd(url) { fetch(url).then(() => { loadFiles(); updateLive(); }); }
 
     function loadFiles() {
@@ -400,8 +588,16 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       let d = {
         date: row[0], time: row[1], lat: row[2], lon: row[3],
         spd: row[4], max: row[5], avg: row[6], alt: row[7],
-        sat: row[10], ram: 0, rom: 0, cpu: 'Replay'
+        sat: row[10], volt: "0.0", amp: "0.0", temp: "0.0",
+        ram: 0, rom: 0, cpu: 'Replay', buzzerState: buzzerEnabled
       };
+      
+      if(row.length >= 15) {
+        d.volt = row[12];
+        d.amp = row[13];
+        d.temp = row[14];
+      }
+
       renderUI(d);
       drawCharts(currentReplayData, replayIndex);
     }
@@ -499,11 +695,15 @@ void handleData() {
   json += "\"minAlt\":\"" + String(minAltitude == 9999.0 ? 0 : minAltitude, 1) + "\",";
   json += "\"sat\":\"" + String(sats) + "\",";
   json += "\"bar\":\"" + String(signalBar) + "\",";
+  json += "\"volt\":\"" + String(currentVoltage, 2) + "\",";
+  json += "\"amp\":\"" + String(currentAmpere, 2) + "\",";
+  json += "\"temp\":\"" + String(moduleTemp, 1) + "\",";
   json += "\"lat\":\"" + String(gps.location.lat(), 6) + "\",";
   json += "\"lon\":\"" + String(gps.location.lng(), 6) + "\",";
   json += "\"ram\":" + String(ramUsagePct) + ",";
   json += "\"rom\":" + String(romUsagePct) + ",";
   json += "\"cpu\":\"" + cpuLoad + "\",";
+  json += "\"buzzerState\":" + String(buzzerEnabled ? "true" : "false") + ",";
   
   int hour = gps.time.hour() + 7; int day = gps.date.day();
   if (hour >= 24) { hour -= 24; day += 1; }
@@ -519,45 +719,45 @@ void handleData() {
   server.send(200, "application/json", json);
 }
 
-void handleStartLog() {
-  char fname[30];
-  if (gps.date.isValid() && gps.time.isValid()) {
-    int hour = gps.time.hour() + 7; 
-    int day = gps.date.day(); 
-    if (hour >= 24) { hour -= 24; day += 1; }
-    sprintf(fname, "/log_%02d%02d%04d_%02d%02d.csv", day, gps.date.month(), gps.date.year(), hour, gps.time.minute());
+void handleToggleBuzzer() {
+  buzzerEnabled = !buzzerEnabled;
+  server.send(200, "application/json", "{\"state\":" + String(buzzerEnabled ? "true" : "false") + "}");
+}
+
+void handleSetFreq() {
+  if (server.hasArg("val")) {
+    buzzerFreq = server.arg("val").toInt();
+    server.send(200, "text/plain", "Frequency set to " + String(buzzerFreq));
   } else {
-    sprintf(fname, "/log_%lu.csv", millis());
-  }
-  
-  currentLogFile = String(fname);
-  Serial.print("Mencoba membuat file log: ");
-  Serial.println(currentLogFile);
-  
-  sumSpeed = 0.0;
-  speedCount = 0;
-  minAltitude = 9999.0;
-  maxAltitude = -9999.0;
-  
-  File f = LittleFS.open(currentLogFile, "w");
-  if (f) {
-    f.println("Date,Time,Latitude,Longitude,Speed(KMH),TopSpeed(KMH),AvgSpeed(KMH),Altitude(m),MaxAlt(m),MinAlt(m),Satellites,SignalBar");
-    f.close();
-    isLogging = true;
-    Serial.println("File log berhasil dibuat!");
-    server.send(200, "text/plain", "Logging Started: " + currentLogFile);
-  } else {
-    Serial.println("GAGAL membuat file di LittleFS! Partisi belum diformat atau salah ukuran Flash Size.");
-    isLogging = false;
-    server.send(500, "text/plain", "Error: Gagal membuat file. Cek partisi flash.");
+    server.send(400, "text/plain", "Missing args");
   }
 }
 
+void handleStartLog() {
+  startLoggerSystem();
+  customBeep(3, 100, 100, 2000); 
+  if(isLogging) server.send(200, "text/plain", "Logging Started: " + currentLogFile);
+  else server.send(500, "text/plain", "Error: Gagal membuat file.");
+}
+
 void handleStopLog() {
-  isLogging = false; 
-  Serial.println("Logging dihentikan.");
-  currentLogFile = "";
+  stopLoggerSystem();
+  customBeep(3, 100, 100, 500); // Sinkronisasi web dengan hardware beep (3x rendah)
   server.send(200, "text/plain", "Logging Stopped");
+}
+
+void handleFileUpload() {
+  HTTPUpload& upload = server.upload();
+  if (upload.status == UPLOAD_FILE_START) {
+    String filename = upload.filename;
+    if (!filename.startsWith("/")) filename = "/" + filename;
+    if(LittleFS.exists(filename)) filename = "/up_" + upload.filename;
+    fsUploadFile = LittleFS.open(filename, "w");
+  } else if (upload.status == UPLOAD_FILE_WRITE) {
+    if (fsUploadFile) fsUploadFile.write(upload.buf, upload.currentSize);
+  } else if (upload.status == UPLOAD_FILE_END) {
+    if (fsUploadFile) fsUploadFile.close();
+  }
 }
 
 void handleRestart() {
@@ -620,13 +820,6 @@ void handleDelete() {
   } else server.send(400, "text/plain", "Missing args");
 }
 
-void handleRename() {
-  if (server.hasArg("old") && server.hasArg("new")) {
-    LittleFS.rename("/" + server.arg("old"), "/" + server.arg("new"));
-    server.send(200, "text/plain", "Renamed");
-  } else server.send(400, "text/plain", "Missing args");
-}
-
 // =========================================================================
 // FUNGSI OLED & LOGGER
 // =========================================================================
@@ -673,14 +866,14 @@ void logGPSData() {
       if (sats >= 3) signalBar = 1; if (sats >= 5) signalBar = 2;
       if (sats >= 7) signalBar = 3; if (sats >= 9) signalBar = 4;
       
-      char logLine[150];
-      sprintf(logLine, "%02d/%02d/%04d,%02d:%02d:%02d,%.6f,%.6f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%d,%d", 
+      char logLine[180];
+      sprintf(logLine, "%02d/%02d/%04d,%02d:%02d:%02d,%.6f,%.6f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%d,%d,%.2f,%.2f,%.1f", 
               day, gps.date.month(), gps.date.year(), 
               hour, gps.time.minute(), gps.time.second(),
               gps.location.lat(), gps.location.lng(), 
               currentSpeed, topSpeed, avgSpeed, 
               currentAlt, (maxAltitude == -9999.0 ? 0 : maxAltitude), (minAltitude == -9999.0 ? 0 : minAltitude), 
-              sats, signalBar);
+              sats, signalBar, currentVoltage, currentAmpere, moduleTemp);
               
       f.println(logLine); f.close();
     }
@@ -693,37 +886,45 @@ void logGPSData() {
 void setup() {
   Serial.begin(115200);
   ss.begin(GPSBaud);
-  Wire.begin(D2, D1);
+  Wire.begin(D1, D2); 
+
+  pinMode(BuzzerPin, OUTPUT);
+  noTone(BuzzerPin);
+  
+  pinMode(ButtonPin, INPUT_PULLUP);
+
+  buzzerBeep(3, 100, 100);
 
   if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
     Serial.println(F("Gagal menyalakan OLED")); for(;;);
   }
 
   if (!LittleFS.begin()) {
-    Serial.println("LittleFS gagal dimount, melakukan format otomatis...");
     if (LittleFS.format()) {
-      Serial.println("LittleFS berhasil diformat.");
       LittleFS.begin();
-    } else {
-      Serial.println("GAGAL memformat LittleFS! Periksa pengaturan Flash Size di Arduino IDE.");
     }
-  } else {
-    Serial.println("LittleFS berhasil dimount.");
   }
 
+  // Setup WiFi AP
   WiFi.mode(WIFI_AP);
   WiFi.softAP(ssid, password);
   
   server.on("/", handleRoot);
   server.on("/data", handleData);
+  server.on("/togglebuzzer", handleToggleBuzzer);
+  server.on("/setfreq", handleSetFreq);
   server.on("/startlog", handleStartLog);
   server.on("/stoplog", handleStopLog);
+  
+  server.on("/upload", HTTP_POST, []() {
+    server.send(200, "text/plain", "Upload Berhasil");
+  }, handleFileUpload);
+
   server.on("/restart", handleRestart);
   server.on("/files", handleListFiles);
   server.on("/view", handleView);
   server.on("/download", handleDownload);
   server.on("/delete", handleDelete);
-  server.on("/rename", handleRename);
   server.begin();
 
   stateTimer = millis();
@@ -735,11 +936,130 @@ void setup() {
 void loop() {
   while (ss.available() > 0) gps.encode(ss.read());
 
-  server.handleClient();
+  if (isWiFiEnabled) {
+    server.handleClient();
+  }
+  
   logGPSData();
   
   int sats = gps.satellites.value();
+  bool currentConnectionState = (sats >= 3);
 
+  // --- LOGIKA ONE BUTTON KEY ---
+  bool currentButtonState = digitalRead(ButtonPin);
+  
+  // Saat Ditekan
+  if (currentButtonState == LOW && lastButtonState == HIGH) {
+    buttonPressTime = millis();
+    longPressHandled = false;
+    delay(20); // Debounce
+  }
+  
+  // Saat Ditahan (Long Press > 3 Detik) -> Toggle WiFi
+  if (currentButtonState == LOW && lastButtonState == LOW) {
+    if (millis() - buttonPressTime >= 3000 && !longPressHandled) {
+      isWiFiEnabled = !isWiFiEnabled;
+      if (isWiFiEnabled) {
+        WiFi.forceSleepWake(); delay(10);
+        WiFi.mode(WIFI_AP);
+        WiFi.softAP(ssid, password);
+        customBeep(1, 600, 0, buzzerFreq); 
+        showPopup("WIFI ON");
+      } else {
+        WiFi.mode(WIFI_OFF);
+        WiFi.forceSleepBegin(); delay(10);
+        customBeep(1, 100, 0, buzzerFreq); 
+        showPopup("WIFI OFF");
+      }
+      longPressHandled = true;
+    }
+  }
+  
+  // Saat Dilepas
+  if (currentButtonState == HIGH && lastButtonState == LOW) {
+    if (!longPressHandled) {
+      clickCount++;
+      lastClickTime = millis();
+    }
+    delay(20); // Debounce
+  }
+
+  // Proses Perhitungan Multi-Klik
+  if (clickCount > 0 && (millis() - lastClickTime) > 400) {
+    if (clickCount == 1) {
+      // 1x Klik -> Wake Up Screen
+      if (currentState == STATE_SCREENSAVER || currentState == STATE_SLEEP) {
+        currentState = STATE_SPEEDOMETER;
+        lastMoveTime = millis();
+        display.ssd1306_command(SSD1306_DISPLAYON);
+        setOLEDContrast(255);
+        display.clearDisplay();
+        showPopup("WAKE UP");
+      }
+      buzzerBeep(1, 100, 0); 
+    } 
+    else if (clickCount == 2) {
+      // 2x Klik -> Mute/Unmute Buzzer
+      buzzerEnabled = !buzzerEnabled;
+      if (buzzerEnabled) {
+        customBeep(1, 150, 0, buzzerFreq); 
+        showPopup("BUZZER ON");
+      } else {
+        showPopup("BUZZER OFF");
+      }
+    }
+    else if (clickCount == 3) {
+      // 3x Klik -> Toggle Record Data Log
+      if (!isLogging) {
+        startLoggerSystem();
+        customBeep(3, 100, 100, 2000); // 3x beep dengan frek 2000Hz (Tinggi)
+        showPopup("LOG START");
+      } else {
+        stopLoggerSystem();
+        customBeep(3, 100, 100, 500); // 3x beep dengan frek 500Hz (Rendah)
+        showPopup("LOG STOP");
+      }
+    }
+    else if (clickCount == 5) {
+      // 5x Klik -> Toggle Auto Screen Saver
+      isScreenSaverEnabled = !isScreenSaverEnabled;
+      if (isScreenSaverEnabled) {
+        customBeep(2, 100, 100, 1500); 
+        showPopup("SCR SAVER ON");
+      } else {
+        customBeep(2, 100, 100, 800);
+        showPopup("SCR SAVER OFF");
+        
+        // Jika sedang dalam mode screensaver saat dimatikan, paksakan bangun ke Dashboard
+        if(currentState == STATE_SCREENSAVER || currentState == STATE_SLEEP) {
+          currentState = STATE_SPEEDOMETER;
+          lastMoveTime = millis();
+          display.ssd1306_command(SSD1306_DISPLAYON);
+          setOLEDContrast(255);
+          display.clearDisplay();
+        }
+      }
+    }
+    clickCount = 0; // Reset hitungan klik
+  }
+  lastButtonState = currentButtonState;
+
+  // --- LOGIKA BUZZER ALERT SINKRONISASI ---
+  if (!currentConnectionState) {
+    // Mode Mencari Sinyal: Trigger Peringatan Buzzer setiap 5 Detik
+    if (millis() - lastBuzzerAlertTime >= 5000) {
+      lastBuzzerAlertTime = millis();
+      if (buzzerEnabled) tone(BuzzerPin, buzzerFreq, 600);
+    }
+  } 
+
+  // Peringatan Buzzer jika baru saja terkoneksi
+  if (currentConnectionState && !lastConnectionState) {
+    buzzerBeep(1, 200, 0); 
+  } 
+  lastConnectionState = currentConnectionState;
+
+  // Pemrosesan Sensor Kecepatan
   if (sats >= 3) {
     double tempSpeed = gps.speed.kmph();
     if (tempSpeed < 1.0) tempSpeed = 0.0;
@@ -756,6 +1076,7 @@ void loop() {
     }
   }
 
+  // --- STATE MACHINE LAYAR OLED ---
   switch (currentState) {
     case STATE_BOOTING: {
       display.clearDisplay(); display.setTextColor(WHITE); display.setTextSize(1);
@@ -816,6 +1137,18 @@ void loop() {
         display.drawCircle(cx, cy, r2, WHITE);
 
         display.setCursor(10, 52); display.print("Satelit Ditemukan: "); display.print(sats);
+        
+        // Cek dan gambar Pop-up Notifikasi sebelum display.display()
+        if (millis() - popupTimer < POPUP_DURATION && popupMsg != "") {
+          int16_t x1, y1; uint16_t w, h;
+          display.setTextSize(1); display.getTextBounds(popupMsg, 0, 0, &x1, &y1, &w, &h);
+          int px = (128 - w) / 2 - 4, py = (64 - h) / 2 - 4;
+          display.fillRect(px, py, w + 8, h + 8, WHITE);
+          display.setTextColor(BLACK);
+          display.setCursor((128 - w) / 2, (64 - h) / 2); display.print(popupMsg);
+          display.setTextColor(WHITE);
+        }
+
         display.display();
       }
       if (sats >= 3) { currentState = STATE_SPEEDOMETER; lastMoveTime = millis(); }
@@ -827,7 +1160,8 @@ void loop() {
       if (currentSpeed < 1.0) currentSpeed = 0.0;
 
       if (currentSpeed > 0.0) lastMoveTime = millis(); 
-      else if (millis() - lastMoveTime > 4000) {
+      // Modifikasi: Hanya masuk screensaver jika isScreenSaverEnabled == true
+      else if (isScreenSaverEnabled && (millis() - lastMoveTime > 4000)) {
         currentState = STATE_SCREENSAVER; screensaverStartTime = millis(); 
         display.clearDisplay(); break;
       }
@@ -868,6 +1202,18 @@ void loop() {
           if (speedInt < 100) display.setCursor(34, 20); else display.setCursor(19, 20);
           display.print(speedInt);
         }
+
+        // Cek dan gambar Pop-up Notifikasi sebelum display.display()
+        if (millis() - popupTimer < POPUP_DURATION && popupMsg != "") {
+          int16_t x1, y1; uint16_t w, h;
+          display.setTextSize(1); display.getTextBounds(popupMsg, 0, 0, &x1, &y1, &w, &h);
+          int px = (128 - w) / 2 - 4, py = (64 - h) / 2 - 4;
+          display.fillRect(px, py, w + 8, h + 8, WHITE);
+          display.setTextColor(BLACK);
+          display.setCursor((128 - w) / 2, (64 - h) / 2); display.print(popupMsg);
+          display.setTextColor(WHITE);
+        }
+
         display.display();
       }
       break;
@@ -882,7 +1228,8 @@ void loop() {
         display.clearDisplay(); break;
       }
 
-      if (millis() - screensaverStartTime > 24000) {
+      // Modifikasi: Hanya lanjut sleep ke mode mati jika isScreenSaverEnabled == true
+      if (isScreenSaverEnabled && (millis() - screensaverStartTime > 30000)) {
         currentState = STATE_SLEEP; display.clearDisplay();
         display.ssd1306_command(SSD1306_DISPLAYOFF); break;
       }
@@ -900,7 +1247,7 @@ void loop() {
         sprintf(dateStringLong, "%02d/%02d/%04d", day, month, gps.date.year());
         sprintf(dateStringShort, "%02d/%02d", day, month);
 
-        unsigned long carouselTimer = (millis() - screensaverStartTime) % 12000;
+        unsigned long carouselTimer = (millis() - screensaverStartTime) % 15000;
         int page = carouselTimer / 3000; 
 
         if (page == 0) display.drawBitmap(0, 0, epd_bitmap_PENYUPUTIH, 128, 64, WHITE);
@@ -919,6 +1266,15 @@ void loop() {
           if (gps.location.isValid()) display.print(gps.location.lng(), 6); else display.print("Mencari...");
         }
         else if (page == 3) {
+          display.setTextSize(1);
+          display.setCursor(0, 2); display.print("POWER & TEMP STATUS");
+          display.drawLine(0, 11, 128, 11, WHITE);
+
+          display.setCursor(0, 18); display.print("Voltage : "); display.print(currentVoltage, 1); display.print(" V");
+          display.setCursor(0, 32); display.print("Current : "); display.print(currentAmpere, 2); display.print(" A");
+          display.setCursor(0, 48); display.print("Temp    : "); display.print(moduleTemp, 1); display.print(" C");
+        }
+        else if (page == 4) {
           drawSignalBars(sats); display.setTextSize(1); display.setCursor(45, 1); 
           if (gps.time.isValid()) display.print(timeString); else display.print("--:--");
           display.setCursor(92, 1); display.print("Sat:"); display.print(sats);
@@ -932,6 +1288,18 @@ void loop() {
           if (gps.altitude.isValid()) { display.print(altTrend); display.print((int)gps.altitude.meters()); } else display.print("-");
           display.setCursor(rightX, 54); if (gps.date.isValid()) display.print(dateStringShort); else display.print("--/--");
         }
+        
+        // Cek dan gambar Pop-up Notifikasi sebelum display.display()
+        if (millis() - popupTimer < POPUP_DURATION && popupMsg != "") {
+          int16_t x1, y1; uint16_t w, h;
+          display.setTextSize(1); display.getTextBounds(popupMsg, 0, 0, &x1, &y1, &w, &h);
+          int px = (128 - w) / 2 - 4, py = (64 - h) / 2 - 4;
+          display.fillRect(px, py, w + 8, h + 8, WHITE);
+          display.setTextColor(BLACK);
+          display.setCursor((128 - w) / 2, (64 - h) / 2); display.print(popupMsg);
+          display.setTextColor(WHITE);
+        }
+
         display.display();
       }
       break;
