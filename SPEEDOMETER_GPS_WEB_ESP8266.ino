@@ -1,6 +1,6 @@
 /*
  * Projek: Speedometer GPS IoT "Penyu" + Racing Dashboard + Power/Temp Monitor
- * Versi Final (V2.44): Pengecualian LED Record Langsung Kedip Cepat Tanpa Delay
+ * Versi Final (V2.45): Screensaver Delay 2 Minutes on 0 KM/H + All Previous Fixes
  * Hardware: ESP8266, GPS NEO-6M, OLED SSD1306, Tactile Button (D4), Buzzer (D8), LED (D7)
  */
 
@@ -771,7 +771,6 @@ void loop() {
   bool currentConnectionState = (sats >= 3);
 
   // --- LOGIKA INDIKATOR LED (NON-BLOCKING) ---
-  // Pengecualian: Jika sedang record log, abaikan jeda/lock dan langsung kedip cepat (150ms)
   if (isLogging) {
     if (millis() - lastLedTime >= 150) { 
       lastLedTime = millis();
@@ -948,8 +947,15 @@ void loop() {
     case STATE_SPEEDOMETER: {
       double currentSpeed = gps.speed.kmph(); if (currentSpeed < 1.0) currentSpeed = 0.0;
 
-      if (currentSpeed > 0.0) lastMoveTime = millis(); 
-      else if (isScreenSaverEnabled && (millis() - lastMoveTime > 4000)) { currentState = STATE_SCREENSAVER; screensaverStartTime = millis(); display.clearDisplay(); break; }
+      if (currentSpeed > 0.0) {
+        lastMoveTime = millis(); 
+      }
+      else if (isScreenSaverEnabled && (millis() - lastMoveTime > 120000)) { // 120000 ms = 2 menit
+        currentState = STATE_SCREENSAVER; 
+        screensaverStartTime = millis(); 
+        display.clearDisplay(); 
+        break; 
+      }
 
       if (millis() - lastDisplayUpdate > 100) {
         lastDisplayUpdate = millis(); display.clearDisplay();
