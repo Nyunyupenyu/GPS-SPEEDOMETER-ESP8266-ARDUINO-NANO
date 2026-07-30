@@ -1,6 +1,6 @@
 /*
  * Projek: Speedometer GPS IoT "Penyu" + Racing Dashboard + Power/Temp Monitor
- * Versi Final (V2.36): Smart Power Management (Delay LED di Awal & Saat Fitur Aktif)
+ * Versi Final (V2.44): Pengecualian LED Record Langsung Kedip Cepat Tanpa Delay
  * Hardware: ESP8266, GPS NEO-6M, OLED SSD1306, Tactile Button (D4), Buzzer (D8), LED (D7)
  */
 
@@ -13,7 +13,7 @@
 #include <ESP8266WebServer.h>
 #include <LittleFS.h>
 
-// --- KONFIGURASI WIFI & SERVER ---
+// --- KONFIGURASI WIFI & SERVER (Default ON) ---
 const char* ssid = "RACE_PANEL_PENYU"; 
 const char* password = "masuk123";     
 ESP8266WebServer server(80);
@@ -55,11 +55,14 @@ int buzzerFreq = 500;
 unsigned long lastLedTime = 0; 
 bool currentLedState = LOW;
 
+// Variabel Proteksi Delay 10 Detik untuk LED setelah OLED / Fitur Aktif
+unsigned long oledWakeEventTime = 0; 
+
 // Variabel Kontrol Sistem
 bool isScreenSaverEnabled = true;
 String popupMsg = "";
 unsigned long popupTimer = 0;
-const unsigned long POPUP_DURATION = 2000; // Durasi Popup 2 Detik
+const unsigned long POPUP_DURATION = 2000; 
 
 // --- VARIABEL KONTROL TOMBOL (STRICT DEBOUNCE) ---
 unsigned long buttonPressStartTime = 0;
@@ -181,6 +184,7 @@ void customBeep(int times, int durationMs, int pauseMs, int freq) {
 void showPopup(String msg) {
   popupMsg = msg;
   popupTimer = millis();
+  oledWakeEventTime = millis(); 
 }
 
 // =========================================================================
@@ -385,6 +389,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
     let isReplaying = false;
     let currentReplayData = [];
     let replayIndex = 0;
+    let lastLoggingState = false;
 
     function renderUI(d) {
       document.getElementById('spd').innerText = Math.round(d.spd);
@@ -473,6 +478,14 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       if(isReplaying) return;
       fetch('/data').then(r => r.json()).then(data => {
         renderUI(data);
+        
+        if (data.isLogging !== lastLoggingState) {
+          if (!data.isLogging) {
+            loadFiles();
+          }
+          lastLoggingState = data.isLogging;
+        }
+
         let statusEl = document.getElementById('logStatus');
         let recArea = document.getElementById('recControlArea');
         if(data.isLogging) {
@@ -670,7 +683,7 @@ void logGPSData() {
       sprintf(logLine, "%02d/%02d/%04d,%02d:%02d:%02d,%.6f,%.6f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%d,%d,%.2f,%.2f,%.1f", 
               day, gps.date.month(), gps.date.year(), hour, gps.time.minute(), gps.time.second(),
               gps.location.lat(), gps.location.lng(), currentSpeed, topSpeed, avgSpeed, 
-              currentAlt, (maxAltitude == -9999.0 ? 0 : maxAltitude), (minAltitude == 9999.0 ? 0 : minAltitude), 
+              currentAlt, (maxAltitude == -9999.0 ? 0 : maxAltitude), (minAltitude == -9999.0 ? 0 : minAltitude), 
               sats, signalBar, currentVoltage, currentAmpere, moduleTemp);
       f.println(logLine); f.close();
     }
@@ -706,6 +719,7 @@ void setup() {
     if (LittleFS.format()) { LittleFS.begin(); }
   }
 
+  // WiFi Default ON saat Boot
   WiFi.mode(WIFI_AP);
   WiFi.softAP(ssid, password);
   
@@ -727,6 +741,7 @@ void setup() {
   Serial.println(F("SPEEDOMETER GPS IOT 'PENYU' SIAP"));
   Serial.println(F("========================================"));
   stateTimer = millis();
+  oledWakeEventTime = millis(); 
 }
 
 // =========================================================================
@@ -755,44 +770,29 @@ void loop() {
   int sats = gps.satellites.value();
   bool currentConnectionState = (sats >= 3);
 
-  // --- LOGIKA INDIKATOR LED (NON-BLOCKING) DENGAN PROTEKSI ARUS ---
-  
-  // 0. SMART POWER MANAGEMENT:
-  // Tunda LED menyala selama 5 detik awal booting, ATAU 
-  // Matikan LED sementara selama 2 detik saat fitur tombol ditekan (saat layar me-render Popup)
-  if (millis() < 5000 || (millis() - popupTimer < POPUP_DURATION)) {
-    digitalWrite(LedPin, LOW);
-    currentLedState = LOW;
-  }
-  else if (!isScreenSaverEnabled) {
-    // 1. Fitur Screensaver di-OFF-kan secara manual -> LED Mati Total
-    digitalWrite(LedPin, LOW);
-    currentLedState = LOW; 
-  } 
-  else if (isLogging) {
-    // 2. Record Log -> Kedip Sangat Cepat (150ms Toggle)
+  // --- LOGIKA INDIKATOR LED (NON-BLOCKING) ---
+  // Pengecualian: Jika sedang record log, abaikan jeda/lock dan langsung kedip cepat (150ms)
+  if (isLogging) {
     if (millis() - lastLedTime >= 150) { 
       lastLedTime = millis();
       currentLedState = !currentLedState;
       digitalWrite(LedPin, currentLedState);
     }
-  } 
-  else if (sats < 3) {
-    // 3. GPS Searching -> Kedip perlahan dengan delay 5 detik
-    if (currentLedState == LOW && (millis() - lastLedTime >= 5000)) {
-      lastLedTime = millis();
-      currentLedState = HIGH;
-      digitalWrite(LedPin, currentLedState);
-    } else if (currentLedState == HIGH && (millis() - lastLedTime >= 100)) { // Menyala kilat 100ms
-      lastLedTime = millis();
-      currentLedState = LOW;
-      digitalWrite(LedPin, currentLedState);
-    }
+  }
+  else if (sats < 3 || (millis() - oledWakeEventTime < 10000)) {
+    digitalWrite(LedPin, LOW);
+    currentLedState = LOW;
+  }
+  else if (!isScreenSaverEnabled) {
+    digitalWrite(LedPin, LOW);
+    currentLedState = LOW; 
   } 
   else {
-    // 4. GPS Lock (Satelit >= 3) & Screensaver ON -> Standby Nyala Terus
-    digitalWrite(LedPin, HIGH);
-    currentLedState = HIGH;
+    if (millis() - lastLedTime >= 400) {
+      lastLedTime = millis();
+      currentLedState = !currentLedState;
+      digitalWrite(LedPin, currentLedState);
+    }
   }
 
   // --- LOGIKA STABIL TACTILE BUTTON (PIN D4 / PULLUP) ---
@@ -865,14 +865,18 @@ void loop() {
     clickCount = 0;
   }
 
+  // --- BUZZER ALERT SAAT PENCARIAN GPS (Jeda 10 Detik Sekali) ---
   if (!currentConnectionState) {
-    if (millis() - lastBuzzerAlertTime >= 5000) {
+    if (millis() - lastBuzzerAlertTime >= 10000) {
       lastBuzzerAlertTime = millis();
       if (buzzerEnabled) { if (isActiveBuzzer) { digitalWrite(BuzzerPin, HIGH); delay(600); digitalWrite(BuzzerPin, LOW); } else { tone(BuzzerPin, buzzerFreq, 600); } }
     }
   } 
 
-  if (currentConnectionState && !lastConnectionState) { buzzerBeep(1, 200, 0); } 
+  if (currentConnectionState && !lastConnectionState) { 
+    buzzerBeep(1, 200, 0); 
+    oledWakeEventTime = millis(); 
+  } 
   lastConnectionState = currentConnectionState;
 
   if (sats >= 3) {
