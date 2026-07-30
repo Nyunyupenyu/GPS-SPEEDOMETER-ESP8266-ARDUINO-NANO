@@ -1,7 +1,7 @@
 /*
- * Projek: Speedometer GPS IoT "Penyu" + Racing Dashboard + Power/Temp Monitor + Import Log
- * Fitur Baru (V2.22): One Button Key (D3), 3x Klik (Toggle Log), 5x Klik (Toggle Screen Saver), Pop-up OLED Lengkap
- * Hardware: ESP8266, GPS NEO-6M, OLED SSD1306, Tactile Button (D3), Buzzer (D8)
+ * Projek: Speedometer GPS IoT "Penyu" + Racing Dashboard + Power/Temp Monitor + Serial Debug
+ * Versi Final (V2.32): FIX DEKLARASI VARIABEL TOMBOL & BUZZER 500Hz
+ * Hardware: ESP8266, GPS NEO-6M, OLED SSD1306, Tactile Button (D4), Buzzer (D8)
  */
 
 #include <Wire.h>
@@ -17,7 +17,7 @@
 const char* ssid = "RACE_PANEL_PENYU"; 
 const char* password = "masuk123";     
 ESP8266WebServer server(80);
-bool isWiFiEnabled = true; // Status awal WiFi menyala
+bool isWiFiEnabled = true; 
 
 // --- KONFIGURASI PORT (PIN) ---
 #define SCREEN_WIDTH 128
@@ -28,7 +28,7 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 static const int RXPin = D5; 
 static const int TXPin = D6; 
 static const int BuzzerPin = D8; 
-static const int ButtonPin = D3; // Pin untuk Tactile Button di D3 (GPIO 0)
+static const int ButtonPin = D4; // GPIO 2 (Tombol Tactile ke GND)
 static const uint32_t GPSBaud = 9600;
 
 TinyGPSPlus gps;
@@ -45,21 +45,30 @@ unsigned long stateTimer = 0;
 unsigned long lastDisplayUpdate = 0;
 unsigned long lastMoveTime = 0; 
 unsigned long screensaverStartTime = 0; 
+unsigned long lastSerialDebugTime = 0; 
 
-// Variabel Fitur Auto Screen Saver
+// --- KONFIGURASI BUZZER ---
+bool isActiveBuzzer = false; // Ubah ke true jika pakai Active Buzzer
+bool buzzerEnabled = true;
+int buzzerFreq = 500; // Default 500Hz
+
+// Variabel Kontrol Sistem
 bool isScreenSaverEnabled = true;
-
-// Variabel Notifikasi Pop-up Layar
 String popupMsg = "";
 unsigned long popupTimer = 0;
-const unsigned long POPUP_DURATION = 2000; // Tampil 2 detik
+const unsigned long POPUP_DURATION = 2000; 
 
-// Variabel Kontrol Tombol (One Button Key)
-unsigned long buttonPressTime = 0;
-unsigned long lastClickTime = 0;
+// --- VARIABEL KONTROL TOMBOL (STRICT DEBOUNCE) ---
+unsigned long buttonPressStartTime = 0;
+unsigned long lastDebounceTime = 0;
+const unsigned long debounceDelay = 50; 
 int clickCount = 0;
-bool lastButtonState = HIGH; 
-bool longPressHandled = false;
+unsigned long multiClickTimer = 0;
+const unsigned long multiClickWindow = 450; 
+bool buttonActive = false;
+bool longPressTriggered = false;
+bool longPressHandled = false;       // Variabel status Long Press
+int lastButtonState = HIGH;           // Variabel status pembacaan tombol terakhir
 
 // Variabel Memori Global & Statistik
 double topSpeed = 0.0;
@@ -77,15 +86,10 @@ String currentLogFile = "";
 unsigned long lastLogTime = 0;
 File fsUploadFile; 
 
-// Variabel Kontrol Buzzer
-bool buzzerEnabled = true;
-int buzzerFreq = 500; 
-
-// Variabel Kontrol Sinyal
 unsigned long lastBuzzerAlertTime = 0;
 bool lastConnectionState = false;
 
-// --- DATA TELEMETRI DAYA & SUHU (Simulasi / Sensor) ---
+// --- DATA TELEMETRI DAYA & SUHU ---
 float currentVoltage = 12.4; 
 float currentAmpere = 0.85;  
 float moduleTemp = 38.5;     
@@ -146,34 +150,50 @@ const unsigned char epd_bitmap_PENYUPUTIH [] PROGMEM = {
   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
-  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
 };
 
 // =========================================================================
-// FUNGSI HELPER
+// FUNGSI HELPER BUZZER
 // =========================================================================
 void buzzerBeep(int times, int durationMs, int pauseMs) {
   if (!buzzerEnabled) return;
   for (int i = 0; i < times; i++) {
-    tone(BuzzerPin, buzzerFreq);
+    if (isActiveBuzzer) {
+      digitalWrite(BuzzerPin, HIGH);
+    } else {
+      tone(BuzzerPin, buzzerFreq);
+    }
     delay(durationMs);
-    noTone(BuzzerPin);
+    if (isActiveBuzzer) {
+      digitalWrite(BuzzerPin, LOW);
+    } else {
+      noTone(BuzzerPin);
+      digitalWrite(BuzzerPin, LOW);
+    }
     if (i < times - 1) delay(pauseMs);
   }
 }
 
-// Fungsi paksa Beep mengabaikan mute dengan frekuensi custom
 void customBeep(int times, int durationMs, int pauseMs, int freq) {
+  if (!buzzerEnabled) return;
   for (int i = 0; i < times; i++) {
-    tone(BuzzerPin, freq);
+    if (isActiveBuzzer) {
+      digitalWrite(BuzzerPin, HIGH);
+    } else {
+      tone(BuzzerPin, freq);
+    }
     delay(durationMs);
-    noTone(BuzzerPin);
+    if (isActiveBuzzer) {
+      digitalWrite(BuzzerPin, LOW);
+    } else {
+      noTone(BuzzerPin);
+      digitalWrite(BuzzerPin, LOW);
+    }
     if (i < times - 1) delay(pauseMs);
   }
 }
 
-// Fungsi untuk memicu pop-up notifikasi di layar
 void showPopup(String msg) {
   popupMsg = msg;
   popupTimer = millis();
@@ -742,7 +762,7 @@ void handleStartLog() {
 
 void handleStopLog() {
   stopLoggerSystem();
-  customBeep(3, 100, 100, 500); // Sinkronisasi web dengan hardware beep (3x rendah)
+  customBeep(3, 100, 100, 500); 
   server.send(200, "text/plain", "Logging Stopped");
 }
 
@@ -872,7 +892,7 @@ void logGPSData() {
               hour, gps.time.minute(), gps.time.second(),
               gps.location.lat(), gps.location.lng(), 
               currentSpeed, topSpeed, avgSpeed, 
-              currentAlt, (maxAltitude == -9999.0 ? 0 : maxAltitude), (minAltitude == -9999.0 ? 0 : minAltitude), 
+              currentAlt, (maxAltitude == -9999.0 ? 0 : maxAltitude), (minAltitude == 9999.0 ? 0 : minAltitude), 
               sats, signalBar, currentVoltage, currentAmpere, moduleTemp);
               
       f.println(logLine); f.close();
@@ -884,16 +904,18 @@ void logGPSData() {
 // SETUP
 // =========================================================================
 void setup() {
-  Serial.begin(115200);
+  Serial.begin(9600); 
   ss.begin(GPSBaud);
+  
   Wire.begin(D1, D2); 
 
   pinMode(BuzzerPin, OUTPUT);
+  digitalWrite(BuzzerPin, LOW);
   noTone(BuzzerPin);
-  
-  pinMode(ButtonPin, INPUT_PULLUP);
 
-  buzzerBeep(3, 100, 100);
+  pinMode(ButtonPin, INPUT_PULLUP); // Tombol Tactile di D4 (GPIO 2)
+
+  buzzerBeep(3, 100, 100); 
 
   if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
     Serial.println(F("Gagal menyalakan OLED")); for(;;);
@@ -905,7 +927,6 @@ void setup() {
     }
   }
 
-  // Setup WiFi AP
   WiFi.mode(WIFI_AP);
   WiFi.softAP(ssid, password);
   
@@ -927,6 +948,10 @@ void setup() {
   server.on("/delete", handleDelete);
   server.begin();
 
+  Serial.println(F("\n========================================"));
+  Serial.println(F("SPEEDOMETER GPS IOT 'PENYU' SIAP"));
+  Serial.println(F("========================================"));
+
   stateTimer = millis();
 }
 
@@ -934,7 +959,25 @@ void setup() {
 // LOOP UTAMA
 // =========================================================================
 void loop() {
-  while (ss.available() > 0) gps.encode(ss.read());
+  while (ss.available() > 0) {
+    char c = ss.read();
+    gps.encode(c);
+  }
+
+  if (millis() - lastSerialDebugTime >= 2000) {
+    lastSerialDebugTime = millis();
+    Serial.print(F("[GPS DEBUG] Satelit: "));
+    Serial.print(gps.satellites.value());
+    Serial.print(F(" | Lock: "));
+    Serial.print(gps.location.isValid() ? "YES" : "NO");
+    Serial.print(F(" | Lat: "));
+    Serial.print(gps.location.lat(), 6);
+    Serial.print(F(" | Lon: "));
+    Serial.print(gps.location.lng(), 6);
+    Serial.print(F(" | Speed: "));
+    Serial.print(gps.speed.kmph());
+    Serial.println(F(" KM/H"));
+  }
 
   if (isWiFiEnabled) {
     server.handleClient();
@@ -945,49 +988,54 @@ void loop() {
   int sats = gps.satellites.value();
   bool currentConnectionState = (sats >= 3);
 
-  // --- LOGIKA ONE BUTTON KEY ---
-  bool currentButtonState = digitalRead(ButtonPin);
-  
-  // Saat Ditekan
-  if (currentButtonState == LOW && lastButtonState == HIGH) {
-    buttonPressTime = millis();
-    longPressHandled = false;
-    delay(20); // Debounce
-  }
-  
-  // Saat Ditahan (Long Press > 3 Detik) -> Toggle WiFi
-  if (currentButtonState == LOW && lastButtonState == LOW) {
-    if (millis() - buttonPressTime >= 3000 && !longPressHandled) {
-      isWiFiEnabled = !isWiFiEnabled;
-      if (isWiFiEnabled) {
-        WiFi.forceSleepWake(); delay(10);
-        WiFi.mode(WIFI_AP);
-        WiFi.softAP(ssid, password);
-        customBeep(1, 600, 0, buzzerFreq); 
-        showPopup("WIFI ON");
-      } else {
-        WiFi.mode(WIFI_OFF);
-        WiFi.forceSleepBegin(); delay(10);
-        customBeep(1, 100, 0, buzzerFreq); 
-        showPopup("WIFI OFF");
-      }
-      longPressHandled = true;
-    }
-  }
-  
-  // Saat Dilepas
-  if (currentButtonState == HIGH && lastButtonState == LOW) {
-    if (!longPressHandled) {
-      clickCount++;
-      lastClickTime = millis();
-    }
-    delay(20); // Debounce
+  // --- LOGIKA STABIL TACTILE BUTTON (PIN D4 / PULLUP) ---
+  int reading = digitalRead(ButtonPin);
+
+  if (reading != lastButtonState) {
+    lastDebounceTime = millis();
   }
 
-  // Proses Perhitungan Multi-Klik
-  if (clickCount > 0 && (millis() - lastClickTime) > 400) {
+  if ((millis() - lastDebounceTime) > debounceDelay) {
+    if (reading == LOW) {
+      if (!buttonActive) {
+        buttonActive = true;
+        buttonPressStartTime = millis();
+        longPressHandled = false;
+      } else {
+        if (!longPressHandled && (millis() - buttonPressStartTime >= 3000)) {
+          isWiFiEnabled = !isWiFiEnabled;
+          if (isWiFiEnabled) {
+            WiFi.forceSleepWake(); delay(10);
+            WiFi.mode(WIFI_AP);
+            WiFi.softAP(ssid, password);
+            customBeep(1, 600, 0, buzzerFreq); 
+            showPopup("WIFI ON");
+          } else {
+            WiFi.mode(WIFI_OFF);
+            WiFi.forceSleepBegin(); delay(10);
+            customBeep(1, 100, 0, buzzerFreq); 
+            showPopup("WIFI OFF");
+          }
+          longPressHandled = true;
+          clickCount = 0; 
+        }
+      }
+    } else {
+      if (buttonActive) {
+        if (!longPressHandled) {
+          if (millis() - buttonPressStartTime < 3000) {
+            clickCount++;
+            multiClickTimer = millis();
+          }
+        }
+        buttonActive = false;
+      }
+    }
+  }
+  lastButtonState = reading;
+
+  if (clickCount > 0 && (millis() - multiClickTimer > multiClickWindow) && !buttonActive) {
     if (clickCount == 1) {
-      // 1x Klik -> Wake Up Screen
       if (currentState == STATE_SCREENSAVER || currentState == STATE_SLEEP) {
         currentState = STATE_SPEEDOMETER;
         lastMoveTime = millis();
@@ -999,38 +1047,34 @@ void loop() {
       buzzerBeep(1, 100, 0); 
     } 
     else if (clickCount == 2) {
-      // 2x Klik -> Mute/Unmute Buzzer
       buzzerEnabled = !buzzerEnabled;
       if (buzzerEnabled) {
         customBeep(1, 150, 0, buzzerFreq); 
         showPopup("BUZZER ON");
       } else {
-        showPopup("BUZZER OFF");
+        showPopup("BUZZER OFF"); 
       }
     }
     else if (clickCount == 3) {
-      // 3x Klik -> Toggle Record Data Log
       if (!isLogging) {
         startLoggerSystem();
-        customBeep(3, 100, 100, 2000); // 3x beep dengan frek 2000Hz (Tinggi)
+        customBeep(3, 100, 100, 2000); 
         showPopup("LOG START");
       } else {
         stopLoggerSystem();
-        customBeep(3, 100, 100, 500); // 3x beep dengan frek 500Hz (Rendah)
+        customBeep(3, 100, 100, 500); 
         showPopup("LOG STOP");
       }
     }
-    else if (clickCount == 5) {
-      // 5x Klik -> Toggle Auto Screen Saver
+    else if (clickCount >= 5) {
       isScreenSaverEnabled = !isScreenSaverEnabled;
       if (isScreenSaverEnabled) {
         customBeep(2, 100, 100, 1500); 
         showPopup("SCR SAVER ON");
       } else {
-        customBeep(2, 100, 100, 800);
+        customBeep(2, 100, 100, 800); 
         showPopup("SCR SAVER OFF");
         
-        // Jika sedang dalam mode screensaver saat dimatikan, paksakan bangun ke Dashboard
         if(currentState == STATE_SCREENSAVER || currentState == STATE_SLEEP) {
           currentState = STATE_SPEEDOMETER;
           lastMoveTime = millis();
@@ -1040,26 +1084,27 @@ void loop() {
         }
       }
     }
-    clickCount = 0; // Reset hitungan klik
+    clickCount = 0;
   }
-  lastButtonState = currentButtonState;
 
-  // --- LOGIKA BUZZER ALERT SINKRONISASI ---
   if (!currentConnectionState) {
-    // Mode Mencari Sinyal: Trigger Peringatan Buzzer setiap 5 Detik
     if (millis() - lastBuzzerAlertTime >= 5000) {
       lastBuzzerAlertTime = millis();
-      if (buzzerEnabled) tone(BuzzerPin, buzzerFreq, 600);
+      if (buzzerEnabled) {
+        if (isActiveBuzzer) {
+          digitalWrite(BuzzerPin, HIGH); delay(600); digitalWrite(BuzzerPin, LOW);
+        } else {
+          tone(BuzzerPin, buzzerFreq, 600);
+        }
+      }
     }
   } 
 
-  // Peringatan Buzzer jika baru saja terkoneksi
   if (currentConnectionState && !lastConnectionState) {
     buzzerBeep(1, 200, 0); 
   } 
   lastConnectionState = currentConnectionState;
 
-  // Pemrosesan Sensor Kecepatan
   if (sats >= 3) {
     double tempSpeed = gps.speed.kmph();
     if (tempSpeed < 1.0) tempSpeed = 0.0;
@@ -1138,7 +1183,6 @@ void loop() {
 
         display.setCursor(10, 52); display.print("Satelit Ditemukan: "); display.print(sats);
         
-        // Cek dan gambar Pop-up Notifikasi sebelum display.display()
         if (millis() - popupTimer < POPUP_DURATION && popupMsg != "") {
           int16_t x1, y1; uint16_t w, h;
           display.setTextSize(1); display.getTextBounds(popupMsg, 0, 0, &x1, &y1, &w, &h);
@@ -1160,7 +1204,6 @@ void loop() {
       if (currentSpeed < 1.0) currentSpeed = 0.0;
 
       if (currentSpeed > 0.0) lastMoveTime = millis(); 
-      // Modifikasi: Hanya masuk screensaver jika isScreenSaverEnabled == true
       else if (isScreenSaverEnabled && (millis() - lastMoveTime > 4000)) {
         currentState = STATE_SCREENSAVER; screensaverStartTime = millis(); 
         display.clearDisplay(); break;
@@ -1203,7 +1246,6 @@ void loop() {
           display.print(speedInt);
         }
 
-        // Cek dan gambar Pop-up Notifikasi sebelum display.display()
         if (millis() - popupTimer < POPUP_DURATION && popupMsg != "") {
           int16_t x1, y1; uint16_t w, h;
           display.setTextSize(1); display.getTextBounds(popupMsg, 0, 0, &x1, &y1, &w, &h);
@@ -1228,7 +1270,6 @@ void loop() {
         display.clearDisplay(); break;
       }
 
-      // Modifikasi: Hanya lanjut sleep ke mode mati jika isScreenSaverEnabled == true
       if (isScreenSaverEnabled && (millis() - screensaverStartTime > 30000)) {
         currentState = STATE_SLEEP; display.clearDisplay();
         display.ssd1306_command(SSD1306_DISPLAYOFF); break;
@@ -1289,7 +1330,6 @@ void loop() {
           display.setCursor(rightX, 54); if (gps.date.isValid()) display.print(dateStringShort); else display.print("--/--");
         }
         
-        // Cek dan gambar Pop-up Notifikasi sebelum display.display()
         if (millis() - popupTimer < POPUP_DURATION && popupMsg != "") {
           int16_t x1, y1; uint16_t w, h;
           display.setTextSize(1); display.getTextBounds(popupMsg, 0, 0, &x1, &y1, &w, &h);
