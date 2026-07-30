@@ -1,6 +1,6 @@
 /*
  * Projek: Speedometer GPS IoT "Penyu" + Racing Dashboard + Power/Temp Monitor
- * Versi Final (V2.45): Screensaver Delay 2 Minutes on 0 KM/H + All Previous Fixes
+ * Versi Final (V2.46): Screen Saver 10s & Sleep Mode 2 min from Screen Saver + All Previous Fixes
  * Hardware: ESP8266, GPS NEO-6M, OLED SSD1306, Tactile Button (D4), Buzzer (D8), LED (D7)
  */
 
@@ -950,7 +950,7 @@ void loop() {
       if (currentSpeed > 0.0) {
         lastMoveTime = millis(); 
       }
-      else if (isScreenSaverEnabled && (millis() - lastMoveTime > 120000)) { // 120000 ms = 2 menit
+      else if (isScreenSaverEnabled && (millis() - lastMoveTime > 10000)) { // 10000 ms = 10 detik
         currentState = STATE_SCREENSAVER; 
         screensaverStartTime = millis(); 
         display.clearDisplay(); 
@@ -996,7 +996,7 @@ void loop() {
       double currentSpeed = gps.speed.kmph(); if (currentSpeed < 1.0) currentSpeed = 0.0;
       
       if (currentSpeed > 0.0) { lastMoveTime = millis(); setOLEDContrast(255); currentState = STATE_SPEEDOMETER; display.clearDisplay(); break; }
-      if (isScreenSaverEnabled && (millis() - screensaverStartTime > 30000)) { currentState = STATE_SLEEP; display.clearDisplay(); display.ssd1306_command(SSD1306_DISPLAYOFF); break; }
+      if (isScreenSaverEnabled && (millis() - screensaverStartTime > 120000)) { currentState = STATE_SLEEP; display.clearDisplay(); display.ssd1306_command(SSD1306_DISPLAYOFF); break; } // 120000 ms = 2 menit dari screensaver
 
       if (millis() - lastDisplayUpdate > 200) { 
         lastDisplayUpdate = millis(); display.clearDisplay();
