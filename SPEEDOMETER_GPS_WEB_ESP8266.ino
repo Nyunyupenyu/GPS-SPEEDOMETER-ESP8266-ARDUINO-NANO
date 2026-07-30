@@ -1,6 +1,6 @@
 /*
  * Projek: Speedometer GPS IoT "Penyu" + Racing Dashboard + Power/Temp Monitor
- * Versi Final (V2.33): Penambahan Fitur LED Indikator & Fix SDA (D1) SCL (D2)
+ * Versi Final (V2.36): Smart Power Management (Delay LED di Awal & Saat Fitur Aktif)
  * Hardware: ESP8266, GPS NEO-6M, OLED SSD1306, Tactile Button (D4), Buzzer (D8), LED (D7)
  */
 
@@ -29,7 +29,7 @@ static const int RXPin = D5;
 static const int TXPin = D6; 
 static const int BuzzerPin = D8; 
 static const int ButtonPin = D4; // GPIO 2 (Tombol Tactile ke GND)
-static const int LedPin = D7;    // GPIO 13 (Pin LED Paling Aman)
+static const int LedPin = D7;    // GPIO 13 (Pin LED)
 static const uint32_t GPSBaud = 9600;
 
 TinyGPSPlus gps;
@@ -52,14 +52,14 @@ unsigned long lastSerialDebugTime = 0;
 bool isActiveBuzzer = false; 
 bool buzzerEnabled = true;
 int buzzerFreq = 500; 
-unsigned long lastLedTime = 0; // Timer berkedip LED
+unsigned long lastLedTime = 0; 
 bool currentLedState = LOW;
 
 // Variabel Kontrol Sistem
 bool isScreenSaverEnabled = true;
 String popupMsg = "";
 unsigned long popupTimer = 0;
-const unsigned long POPUP_DURATION = 2000; 
+const unsigned long POPUP_DURATION = 2000; // Durasi Popup 2 Detik
 
 // --- VARIABEL KONTROL TOMBOL (STRICT DEBOUNCE) ---
 unsigned long buttonPressStartTime = 0;
@@ -152,12 +152,11 @@ const unsigned char epd_bitmap_PENYUPUTIH [] PROGMEM = {
   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
-  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
 };
 
 // =========================================================================
-// FUNGSI HELPER BUZZER
+// FUNGSI HELPER BUZZER & POPUP
 // =========================================================================
 void buzzerBeep(int times, int durationMs, int pauseMs) {
   if (!buzzerEnabled) return;
@@ -685,7 +684,7 @@ void setup() {
   Serial.begin(9600); 
   ss.begin(GPSBaud);
   
-  // FIX: SDA = D1, SCL = D2 Sesuai Wiring Anda
+  // SDA = D1, SCL = D2 Sesuai Wiring Anda
   Wire.begin(D1, D2); 
 
   pinMode(BuzzerPin, OUTPUT);
@@ -695,7 +694,7 @@ void setup() {
   pinMode(ButtonPin, INPUT_PULLUP); // Tombol Tactile di D4 (GPIO 2)
   
   pinMode(LedPin, OUTPUT);          // LED Indikator di D7 (GPIO 13)
-  digitalWrite(LedPin, LOW);        // Pastikan LED mati saat awal
+  digitalWrite(LedPin, LOW);        // Pastikan LED mati saat awal (Proteksi OLED)
 
   buzzerBeep(3, 100, 100); 
 
@@ -756,11 +755,19 @@ void loop() {
   int sats = gps.satellites.value();
   bool currentConnectionState = (sats >= 3);
 
-  // --- LOGIKA INDIKATOR LED (NON-BLOCKING) ---
-  if (!isScreenSaverEnabled || currentState == STATE_SLEEP) {
-    // 1. Layar Mati Total ATAU Screensaver dimatikan manual -> LED Off Total
+  // --- LOGIKA INDIKATOR LED (NON-BLOCKING) DENGAN PROTEKSI ARUS ---
+  
+  // 0. SMART POWER MANAGEMENT:
+  // Tunda LED menyala selama 5 detik awal booting, ATAU 
+  // Matikan LED sementara selama 2 detik saat fitur tombol ditekan (saat layar me-render Popup)
+  if (millis() < 5000 || (millis() - popupTimer < POPUP_DURATION)) {
     digitalWrite(LedPin, LOW);
-    currentLedState = LOW; // Sync variable state
+    currentLedState = LOW;
+  }
+  else if (!isScreenSaverEnabled) {
+    // 1. Fitur Screensaver di-OFF-kan secara manual -> LED Mati Total
+    digitalWrite(LedPin, LOW);
+    currentLedState = LOW; 
   } 
   else if (isLogging) {
     // 2. Record Log -> Kedip Sangat Cepat (150ms Toggle)
@@ -783,7 +790,7 @@ void loop() {
     }
   } 
   else {
-    // 4. GPS Lock (Satelit >= 3) -> Standby Nyala Terus
+    // 4. GPS Lock (Satelit >= 3) & Screensaver ON -> Standby Nyala Terus
     digitalWrite(LedPin, HIGH);
     currentLedState = HIGH;
   }
