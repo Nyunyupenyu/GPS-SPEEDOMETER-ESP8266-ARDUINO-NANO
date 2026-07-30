@@ -1,7 +1,7 @@
 /*
- * Projek: Speedometer GPS IoT "Penyu" + Racing Dashboard + Power/Temp Monitor + Serial Debug
- * Versi Final (V2.32): FIX DEKLARASI VARIABEL TOMBOL & BUZZER 500Hz
- * Hardware: ESP8266, GPS NEO-6M, OLED SSD1306, Tactile Button (D4), Buzzer (D8)
+ * Projek: Speedometer GPS IoT "Penyu" + Racing Dashboard + Power/Temp Monitor
+ * Versi Final (V2.33): Penambahan Fitur LED Indikator & Fix SDA (D1) SCL (D2)
+ * Hardware: ESP8266, GPS NEO-6M, OLED SSD1306, Tactile Button (D4), Buzzer (D8), LED (D7)
  */
 
 #include <Wire.h>
@@ -29,6 +29,7 @@ static const int RXPin = D5;
 static const int TXPin = D6; 
 static const int BuzzerPin = D8; 
 static const int ButtonPin = D4; // GPIO 2 (Tombol Tactile ke GND)
+static const int LedPin = D7;    // GPIO 13 (Pin LED Paling Aman)
 static const uint32_t GPSBaud = 9600;
 
 TinyGPSPlus gps;
@@ -47,10 +48,12 @@ unsigned long lastMoveTime = 0;
 unsigned long screensaverStartTime = 0; 
 unsigned long lastSerialDebugTime = 0; 
 
-// --- KONFIGURASI BUZZER ---
-bool isActiveBuzzer = false; // Ubah ke true jika pakai Active Buzzer
+// --- KONFIGURASI BUZZER & LED ---
+bool isActiveBuzzer = false; 
 bool buzzerEnabled = true;
-int buzzerFreq = 500; // Default 500Hz
+int buzzerFreq = 500; 
+unsigned long lastLedTime = 0; // Timer berkedip LED
+bool currentLedState = LOW;
 
 // Variabel Kontrol Sistem
 bool isScreenSaverEnabled = true;
@@ -67,8 +70,8 @@ unsigned long multiClickTimer = 0;
 const unsigned long multiClickWindow = 450; 
 bool buttonActive = false;
 bool longPressTriggered = false;
-bool longPressHandled = false;       // Variabel status Long Press
-int lastButtonState = HIGH;           // Variabel status pembacaan tombol terakhir
+bool longPressHandled = false;       
+int lastButtonState = HIGH;           
 
 // Variabel Memori Global & Statistik
 double topSpeed = 0.0;
@@ -159,18 +162,9 @@ const unsigned char epd_bitmap_PENYUPUTIH [] PROGMEM = {
 void buzzerBeep(int times, int durationMs, int pauseMs) {
   if (!buzzerEnabled) return;
   for (int i = 0; i < times; i++) {
-    if (isActiveBuzzer) {
-      digitalWrite(BuzzerPin, HIGH);
-    } else {
-      tone(BuzzerPin, buzzerFreq);
-    }
+    if (isActiveBuzzer) digitalWrite(BuzzerPin, HIGH); else tone(BuzzerPin, buzzerFreq);
     delay(durationMs);
-    if (isActiveBuzzer) {
-      digitalWrite(BuzzerPin, LOW);
-    } else {
-      noTone(BuzzerPin);
-      digitalWrite(BuzzerPin, LOW);
-    }
+    if (isActiveBuzzer) digitalWrite(BuzzerPin, LOW); else { noTone(BuzzerPin); digitalWrite(BuzzerPin, LOW); }
     if (i < times - 1) delay(pauseMs);
   }
 }
@@ -178,18 +172,9 @@ void buzzerBeep(int times, int durationMs, int pauseMs) {
 void customBeep(int times, int durationMs, int pauseMs, int freq) {
   if (!buzzerEnabled) return;
   for (int i = 0; i < times; i++) {
-    if (isActiveBuzzer) {
-      digitalWrite(BuzzerPin, HIGH);
-    } else {
-      tone(BuzzerPin, freq);
-    }
+    if (isActiveBuzzer) digitalWrite(BuzzerPin, HIGH); else tone(BuzzerPin, freq);
     delay(durationMs);
-    if (isActiveBuzzer) {
-      digitalWrite(BuzzerPin, LOW);
-    } else {
-      noTone(BuzzerPin);
-      digitalWrite(BuzzerPin, LOW);
-    }
+    if (isActiveBuzzer) digitalWrite(BuzzerPin, LOW); else { noTone(BuzzerPin); digitalWrite(BuzzerPin, LOW); }
     if (i < times - 1) delay(pauseMs);
   }
 }
@@ -205,8 +190,7 @@ void showPopup(String msg) {
 void startLoggerSystem() {
   char fname[30];
   if (gps.date.isValid() && gps.time.isValid()) {
-    int hour = gps.time.hour() + 7; 
-    int day = gps.date.day(); 
+    int hour = gps.time.hour() + 7; int day = gps.date.day(); 
     if (hour >= 24) { hour -= 24; day += 1; }
     sprintf(fname, "/log_%02d%02d%04d_%02d%02d.csv", day, gps.date.month(), gps.date.year(), hour, gps.time.minute());
   } else {
@@ -214,24 +198,19 @@ void startLoggerSystem() {
   }
   
   currentLogFile = String(fname);
-  sumSpeed = 0.0;
-  speedCount = 0;
-  minAltitude = 9999.0;
-  maxAltitude = -9999.0;
+  sumSpeed = 0.0; speedCount = 0; minAltitude = 9999.0; maxAltitude = -9999.0;
   
   File f = LittleFS.open(currentLogFile, "w");
   if (f) {
     f.println("Date,Time,Latitude,Longitude,Speed(KMH),TopSpeed(KMH),AvgSpeed(KMH),Altitude(m),MaxAlt(m),MinAlt(m),Satellites,SignalBar,Voltage(V),Current(A),Temp(C)");
-    f.close();
-    isLogging = true;
+    f.close(); isLogging = true;
   } else {
     isLogging = false;
   }
 }
 
 void stopLoggerSystem() {
-  isLogging = false; 
-  currentLogFile = "";
+  isLogging = false; currentLogFile = "";
 }
 
 // =========================================================================
@@ -448,24 +427,13 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       }
     }
     
-    function updateFreqDisplay(val) {
-      document.getElementById('freqVal').innerText = val;
-    }
-
-    function setBuzzerFreq(val) {
-      fetch('/setfreq?val=' + val);
-    }
-
+    function updateFreqDisplay(val) { document.getElementById('freqVal').innerText = val; }
+    function setBuzzerFreq(val) { fetch('/setfreq?val=' + val); }
     function toggleBuzzerState() {
       fetch('/togglebuzzer').then(r => r.json()).then(d => {
         let btn = document.getElementById('buzzerToggleBtn');
-        if(d.state) {
-          btn.innerText = "ON";
-          btn.className = "toggle-on";
-        } else {
-          btn.innerText = "OFF";
-          btn.className = "toggle-off";
-        }
+        if(d.state) { btn.innerText = "ON"; btn.className = "toggle-on"; } 
+        else { btn.innerText = "OFF"; btn.className = "toggle-off"; }
       });
     }
 
@@ -478,43 +446,26 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       const canvas = document.getElementById(canvasId);
       if(!canvas) return;
       const ctx = canvas.getContext('2d');
-      
-      if(canvas.width !== canvas.parentElement.clientWidth) {
-          canvas.width = canvas.parentElement.clientWidth;
-      }
-      const w = canvas.width;
-      const h = canvas.height;
-
+      if(canvas.width !== canvas.parentElement.clientWidth) canvas.width = canvas.parentElement.clientWidth;
+      const w = canvas.width, h = canvas.height;
       ctx.clearRect(0, 0, w, h);
 
       let maxVal = 10;
-      dataArray.forEach(row => {
-        let v = parseFloat(row[colIdx]);
-        if(v > maxVal) maxVal = v;
-      });
+      dataArray.forEach(row => { let v = parseFloat(row[colIdx]); if(v > maxVal) maxVal = v; });
 
-      ctx.beginPath();
-      ctx.strokeStyle = strokeColor;
-      ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.strokeStyle = strokeColor; ctx.lineWidth = 2;
       for(let i=0; i<dataArray.length; i++) {
         let x = (i / (dataArray.length - 1)) * w;
         let y = h - ((parseFloat(dataArray[i][colIdx]) / maxVal) * (h - 10)) - 5;
-        if(i===0) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
+        if(i===0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
       }
       ctx.stroke();
 
       if(currentIndex >= 0 && dataArray.length > 1) {
         let px = (currentIndex / (dataArray.length - 1)) * w;
-        ctx.beginPath();
-        ctx.strokeStyle = '#ff0055';
-        ctx.lineWidth = 2;
-        ctx.moveTo(px, 0);
-        ctx.lineTo(px, h);
-        ctx.stroke();
-        
-        ctx.fillStyle = '#fff';
-        ctx.font = '10px Arial';
+        ctx.beginPath(); ctx.strokeStyle = '#ff0055'; ctx.lineWidth = 2;
+        ctx.moveTo(px, 0); ctx.lineTo(px, h); ctx.stroke();
+        ctx.fillStyle = '#fff'; ctx.font = '10px Arial';
         ctx.fillText(Math.round(dataArray[currentIndex][colIdx]), px > w - 30 ? px - 30 : px + 5, 12);
       }
     }
@@ -525,14 +476,11 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
         renderUI(data);
         let statusEl = document.getElementById('logStatus');
         let recArea = document.getElementById('recControlArea');
-        
         if(data.isLogging) {
-          statusEl.innerText = "RECORDING";
-          statusEl.style.color = "#ff0055";
+          statusEl.innerText = "RECORDING"; statusEl.style.color = "#ff0055";
           recArea.innerHTML = `<button class="danger" onclick="cmd('/stoplog')" style="width: 100%;">REC STOP</button>`;
         } else {
-          statusEl.innerText = "LIVE";
-          statusEl.style.color = "#00ff88";
+          statusEl.innerText = "LIVE"; statusEl.style.color = "#00ff88";
           recArea.innerHTML = `<button class="play" id="startRecBtn" onclick="cmd('/startlog')">REC START</button>`;
         }
       });
@@ -541,36 +489,18 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
     function uploadFile() {
       let fileInput = document.getElementById('fileInput');
       let statusStr = document.getElementById('uploadStatus');
-      
-      if(fileInput.files.length === 0) {
-        statusStr.innerText = "Pilih file!";
-        statusStr.style.color = "#dc3545";
-        return;
-      }
+      if(fileInput.files.length === 0) { statusStr.innerText = "Pilih file!"; statusStr.style.color = "#dc3545"; return; }
       
       let file = fileInput.files[0];
-      let formData = new FormData();
-      formData.append("file", file, file.name);
+      let formData = new FormData(); formData.append("file", file, file.name);
 
-      statusStr.innerText = "Uploading...";
-      statusStr.style.color = "#ffaa00";
-
+      statusStr.innerText = "Uploading..."; statusStr.style.color = "#ffaa00";
       fetch('/upload', { method: 'POST', body: formData })
         .then(response => {
-          if(response.ok) {
-            statusStr.innerText = "Sukses!";
-            statusStr.style.color = "#00ff88";
-            fileInput.value = ""; 
-            loadFiles(); 
-          } else {
-            statusStr.innerText = "Gagal!";
-            statusStr.style.color = "#dc3545";
-          }
+          if(response.ok) { statusStr.innerText = "Sukses!"; statusStr.style.color = "#00ff88"; fileInput.value = ""; loadFiles(); } 
+          else { statusStr.innerText = "Gagal!"; statusStr.style.color = "#dc3545"; }
         })
-        .catch(error => {
-          statusStr.innerText = "Error!";
-          statusStr.style.color = "#dc3545";
-        });
+        .catch(error => { statusStr.innerText = "Error!"; statusStr.style.color = "#dc3545"; });
     }
 
     function cmd(url) { fetch(url).then(() => { loadFiles(); updateLive(); }); }
@@ -578,9 +508,8 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
     function loadFiles() {
       fetch('/files').then(r => r.json()).then(files => {
         let html = '<tr><th>File Name</th><th>Size</th><th>Action</th></tr>';
-        if(files.length === 0) {
-          html += `<tr><td colspan="3" style="text-align:center; color:#777;">Tidak ada file log tersimpan</td></tr>`;
-        } else {
+        if(files.length === 0) { html += `<tr><td colspan="3" style="text-align:center; color:#777;">Tidak ada file log</td></tr>`; } 
+        else {
           files.forEach(f => {
             html += `<tr><td>${f.name}</td><td>${f.size}B</td>
             <td>
@@ -594,80 +523,45 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       });
     }
     
-    function restartDevice() {
-      if(confirm("Yakin ingin merestart perangkat ESP8266?")) {
-        fetch('/restart').then(() => {
-          alert("Perangkat sedang restart...");
-        });
-      }
-    }
+    function restartDevice() { if(confirm("Yakin ingin merestart perangkat ESP8266?")) { fetch('/restart').then(() => { alert("Restarting..."); }); } }
 
     function processReplayFrame() {
       document.getElementById('timeSlider').value = replayIndex;
       let row = currentReplayData[replayIndex];
       let d = {
-        date: row[0], time: row[1], lat: row[2], lon: row[3],
-        spd: row[4], max: row[5], avg: row[6], alt: row[7],
-        sat: row[10], volt: "0.0", amp: "0.0", temp: "0.0",
-        ram: 0, rom: 0, cpu: 'Replay', buzzerState: buzzerEnabled
+        date: row[0], time: row[1], lat: row[2], lon: row[3], spd: row[4], max: row[5], avg: row[6], alt: row[7],
+        sat: row[10], volt: "0.0", amp: "0.0", temp: "0.0", ram: 0, rom: 0, cpu: 'Replay', buzzerState: buzzerEnabled
       };
-      
-      if(row.length >= 15) {
-        d.volt = row[12];
-        d.amp = row[13];
-        d.temp = row[14];
-      }
-
-      renderUI(d);
-      drawCharts(currentReplayData, replayIndex);
+      if(row.length >= 15) { d.volt = row[12]; d.amp = row[13]; d.temp = row[14]; }
+      renderUI(d); drawCharts(currentReplayData, replayIndex);
     }
 
     function playReplay(fileName) {
-      clearInterval(liveInterval); 
-      isReplaying = true;
-      document.getElementById('logStatus').innerText = "REPLAYING";
-      document.getElementById('logStatus').style.color = "#00d2ff";
-      
-      fetch('/view?file=' + fileName)
-        .then(response => response.text())
-        .then(csv => {
+      clearInterval(liveInterval); isReplaying = true;
+      document.getElementById('logStatus').innerText = "REPLAYING"; document.getElementById('logStatus').style.color = "#00d2ff";
+      fetch('/view?file=' + fileName).then(response => response.text()).then(csv => {
           let lines = csv.split('\n').filter(line => line.trim().length > 0);
           if(lines.length <= 1) { alert("Log kosong!"); stopReplay(); return; }
-          
-          currentReplayData = [];
-          for(let i=1; i<lines.length; i++){ currentReplayData.push(lines[i].split(',')); }
-          
+          currentReplayData = []; for(let i=1; i<lines.length; i++){ currentReplayData.push(lines[i].split(',')); }
           replayIndex = 0;
           document.getElementById('replayControls').style.display = 'block';
-          let slider = document.getElementById('timeSlider');
-          slider.max = currentReplayData.length - 1;
-          slider.value = 0;
-
+          document.getElementById('timeSlider').max = currentReplayData.length - 1; document.getElementById('timeSlider').value = 0;
           if(replayInterval) clearInterval(replayInterval);
-          
           processReplayFrame();
-
           replayInterval = setInterval(() => {
             replayIndex++;
-            if(replayIndex >= currentReplayData.length) { 
-              stopReplay(); alert("Replay Selesai"); return; 
-            }
+            if(replayIndex >= currentReplayData.length) { stopReplay(); alert("Replay Selesai"); return; }
             processReplayFrame();
           }, 1000); 
         });
     }
 
-    document.getElementById('timeSlider').addEventListener('input', function() {
-      replayIndex = parseInt(this.value);
-      processReplayFrame();
-    });
+    document.getElementById('timeSlider').addEventListener('input', function() { replayIndex = parseInt(this.value); processReplayFrame(); });
 
     function stopReplay() {
       if(replayInterval) clearInterval(replayInterval);
-      isReplaying = false;
-      document.getElementById('replayControls').style.display = "none";
-      document.getElementById('logStatus').innerText = "LIVE";
-      document.getElementById('logStatus').style.color = "#00ff88";
+      isReplaying = false; document.getElementById('replayControls').style.display = "none";
+      document.getElementById('logStatus').innerText = "LIVE"; document.getElementById('logStatus').style.color = "#00ff88";
       liveInterval = setInterval(updateLive, 1000); 
     }
     
@@ -678,7 +572,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
 )rawliteral";
 
 // =========================================================================
-// FUNGSI WEB SERVER ROUTING & STATS SYSTEM
+// FUNGSI WEB SERVER ROUTING 
 // =========================================================================
 void handleRoot() { server.send(200, "text/html", INDEX_HTML); }
 
@@ -688,213 +582,97 @@ void handleData() {
   int sats = gps.satellites.value();
 
   int signalBar = 0;
-  if (sats >= 3) signalBar = 1;
-  if (sats >= 5) signalBar = 2;
-  if (sats >= 7) signalBar = 3;
-  if (sats >= 9) signalBar = 4;
+  if (sats >= 3) signalBar = 1; if (sats >= 5) signalBar = 2;
+  if (sats >= 7) signalBar = 3; if (sats >= 9) signalBar = 4;
 
   double currentAvg = speedCount > 0 ? (sumSpeed / speedCount) : 0.0;
-
-  uint32_t freeRam = ESP.getFreeHeap();
-  int ramUsagePct = ((81920 - freeRam) * 100) / 81920;
-
-  uint32_t totalSketchSize = ESP.getSketchSize();
-  uint32_t freeSketchSpace = ESP.getFreeSketchSpace();
-  uint32_t totalRom = totalSketchSize + freeSketchSpace;
-  int romUsagePct = (totalSketchSize * 100) / totalRom;
-
-  String cpuLoad = "Optimal";
-  if (millis() % 5000 < 1000) cpuLoad = "Normal";
+  uint32_t freeRam = ESP.getFreeHeap(); int ramUsagePct = ((81920 - freeRam) * 100) / 81920;
+  uint32_t totalSketchSize = ESP.getSketchSize(); uint32_t freeSketchSpace = ESP.getFreeSketchSpace();
+  uint32_t totalRom = totalSketchSize + freeSketchSpace; int romUsagePct = (totalSketchSize * 100) / totalRom;
+  String cpuLoad = (millis() % 5000 < 1000) ? "Normal" : "Optimal";
 
   String json = "{";
-  json += "\"spd\":\"" + String(currentSpeed, 1) + "\",";
-  json += "\"max\":\"" + String(topSpeed, 1) + "\",";
-  json += "\"avg\":\"" + String(currentAvg, 1) + "\",";
-  json += "\"alt\":\"" + String(currentAlt, 1) + "\",";
-  json += "\"maxAlt\":\"" + String(maxAltitude == -9999.0 ? 0 : maxAltitude, 1) + "\",";
-  json += "\"minAlt\":\"" + String(minAltitude == 9999.0 ? 0 : minAltitude, 1) + "\",";
-  json += "\"sat\":\"" + String(sats) + "\",";
-  json += "\"bar\":\"" + String(signalBar) + "\",";
-  json += "\"volt\":\"" + String(currentVoltage, 2) + "\",";
-  json += "\"amp\":\"" + String(currentAmpere, 2) + "\",";
-  json += "\"temp\":\"" + String(moduleTemp, 1) + "\",";
-  json += "\"lat\":\"" + String(gps.location.lat(), 6) + "\",";
-  json += "\"lon\":\"" + String(gps.location.lng(), 6) + "\",";
-  json += "\"ram\":" + String(ramUsagePct) + ",";
-  json += "\"rom\":" + String(romUsagePct) + ",";
-  json += "\"cpu\":\"" + cpuLoad + "\",";
+  json += "\"spd\":\"" + String(currentSpeed, 1) + "\",\"max\":\"" + String(topSpeed, 1) + "\",\"avg\":\"" + String(currentAvg, 1) + "\",";
+  json += "\"alt\":\"" + String(currentAlt, 1) + "\",\"maxAlt\":\"" + String(maxAltitude == -9999.0 ? 0 : maxAltitude, 1) + "\",";
+  json += "\"minAlt\":\"" + String(minAltitude == 9999.0 ? 0 : minAltitude, 1) + "\",\"sat\":\"" + String(sats) + "\",\"bar\":\"" + String(signalBar) + "\",";
+  json += "\"volt\":\"" + String(currentVoltage, 2) + "\",\"amp\":\"" + String(currentAmpere, 2) + "\",\"temp\":\"" + String(moduleTemp, 1) + "\",";
+  json += "\"lat\":\"" + String(gps.location.lat(), 6) + "\",\"lon\":\"" + String(gps.location.lng(), 6) + "\",";
+  json += "\"ram\":" + String(ramUsagePct) + ",\"rom\":" + String(romUsagePct) + ",\"cpu\":\"" + cpuLoad + "\",";
   json += "\"buzzerState\":" + String(buzzerEnabled ? "true" : "false") + ",";
   
-  int hour = gps.time.hour() + 7; int day = gps.date.day();
-  if (hour >= 24) { hour -= 24; day += 1; }
-  
+  int hour = gps.time.hour() + 7; int day = gps.date.day(); if (hour >= 24) { hour -= 24; day += 1; }
   char timeStr[9]; sprintf(timeStr, "%02d:%02d:%02d", hour, gps.time.minute(), gps.time.second());
   char dateStr[11]; sprintf(dateStr, "%02d/%02d/%04d", day, gps.date.month(), gps.date.year());
   
-  json += "\"time\":\"" + String(timeStr) + "\",";
-  json += "\"date\":\"" + String(dateStr) + "\",";
-  json += "\"isLogging\":" + String(isLogging ? "true" : "false") + ",";
-  json += "\"file\":\"" + currentLogFile + "\"";
-  json += "}";
+  json += "\"time\":\"" + String(timeStr) + "\",\"date\":\"" + String(dateStr) + "\",";
+  json += "\"isLogging\":" + String(isLogging ? "true" : "false") + ",\"file\":\"" + currentLogFile + "\"}";
   server.send(200, "application/json", json);
 }
 
-void handleToggleBuzzer() {
-  buzzerEnabled = !buzzerEnabled;
-  server.send(200, "application/json", "{\"state\":" + String(buzzerEnabled ? "true" : "false") + "}");
-}
-
-void handleSetFreq() {
-  if (server.hasArg("val")) {
-    buzzerFreq = server.arg("val").toInt();
-    server.send(200, "text/plain", "Frequency set to " + String(buzzerFreq));
-  } else {
-    server.send(400, "text/plain", "Missing args");
-  }
-}
-
-void handleStartLog() {
-  startLoggerSystem();
-  customBeep(3, 100, 100, 2000); 
-  if(isLogging) server.send(200, "text/plain", "Logging Started: " + currentLogFile);
-  else server.send(500, "text/plain", "Error: Gagal membuat file.");
-}
-
-void handleStopLog() {
-  stopLoggerSystem();
-  customBeep(3, 100, 100, 500); 
-  server.send(200, "text/plain", "Logging Stopped");
-}
+void handleToggleBuzzer() { buzzerEnabled = !buzzerEnabled; server.send(200, "application/json", "{\"state\":" + String(buzzerEnabled ? "true" : "false") + "}"); }
+void handleSetFreq() { if(server.hasArg("val")) { buzzerFreq = server.arg("val").toInt(); server.send(200, "text/plain", "OK"); } }
+void handleStartLog() { startLoggerSystem(); customBeep(3, 100, 100, 2000); if(isLogging) server.send(200, "text/plain", "OK"); else server.send(500, "text/plain", "Err"); }
+void handleStopLog() { stopLoggerSystem(); customBeep(3, 100, 100, 500); server.send(200, "text/plain", "OK"); }
 
 void handleFileUpload() {
   HTTPUpload& upload = server.upload();
   if (upload.status == UPLOAD_FILE_START) {
-    String filename = upload.filename;
-    if (!filename.startsWith("/")) filename = "/" + filename;
+    String filename = upload.filename; if (!filename.startsWith("/")) filename = "/" + filename;
     if(LittleFS.exists(filename)) filename = "/up_" + upload.filename;
     fsUploadFile = LittleFS.open(filename, "w");
-  } else if (upload.status == UPLOAD_FILE_WRITE) {
-    if (fsUploadFile) fsUploadFile.write(upload.buf, upload.currentSize);
-  } else if (upload.status == UPLOAD_FILE_END) {
-    if (fsUploadFile) fsUploadFile.close();
-  }
+  } else if (upload.status == UPLOAD_FILE_WRITE) { if (fsUploadFile) fsUploadFile.write(upload.buf, upload.currentSize);
+  } else if (upload.status == UPLOAD_FILE_END) { if (fsUploadFile) fsUploadFile.close(); }
 }
 
-void handleRestart() {
-  server.send(200, "text/plain", "Device Restarting...");
-  delay(500);
-  ESP.restart();
-}
-
+void handleRestart() { server.send(200, "text/plain", "Restarting..."); delay(500); ESP.restart(); }
 void handleListFiles() {
-  String json = "[";
-  Dir dir = LittleFS.openDir("/");
-  bool first = true;
+  String json = "["; Dir dir = LittleFS.openDir("/"); bool first = true;
   while (dir.next()) {
     if (dir.isFile()) {
       if (!first) json += ",";
-      String fname = dir.fileName();
-      if (fname.startsWith("/")) fname = fname.substring(1); 
-      
-      File f = LittleFS.open("/" + fname, "r");
-      size_t fsize = f ? f.size() : 0;
-      if (f) f.close();
-
-      json += "{\"name\":\"" + fname + "\",\"size\":" + String(fsize) + "}";
-      first = false;
+      String fname = dir.fileName(); if (fname.startsWith("/")) fname = fname.substring(1); 
+      File f = LittleFS.open("/" + fname, "r"); size_t fsize = f ? f.size() : 0; if (f) f.close();
+      json += "{\"name\":\"" + fname + "\",\"size\":" + String(fsize) + "}"; first = false;
     }
   }
-  json += "]";
-  server.send(200, "application/json", json);
+  json += "]"; server.send(200, "application/json", json);
 }
-
 void handleView() {
-  if (server.hasArg("file")) {
-    String path = "/" + server.arg("file");
-    if (LittleFS.exists(path)) {
-      File file = LittleFS.open(path, "r");
-      server.streamFile(file, "text/plain"); 
-      file.close(); return;
-    }
-  }
-  server.send(404, "text/plain", "File Not Found");
+  if (server.hasArg("file")) { String path = "/" + server.arg("file"); if (LittleFS.exists(path)) { File file = LittleFS.open(path, "r"); server.streamFile(file, "text/plain"); file.close(); return; } }
+  server.send(404, "text/plain", "404");
 }
-
 void handleDownload() {
-  if (server.hasArg("file")) {
-    String path = "/" + server.arg("file");
-    if (LittleFS.exists(path)) {
-      File file = LittleFS.open(path, "r");
-      server.sendHeader("Content-Disposition", "attachment; filename=\"" + server.arg("file") + "\"");
-      server.streamFile(file, "text/csv");
-      file.close(); return;
-    }
-  }
-  server.send(404, "text/plain", "File Not Found");
+  if (server.hasArg("file")) { String path = "/" + server.arg("file"); if (LittleFS.exists(path)) { File file = LittleFS.open(path, "r"); server.sendHeader("Content-Disposition", "attachment; filename=\"" + server.arg("file") + "\""); server.streamFile(file, "text/csv"); file.close(); return; } }
+  server.send(404, "text/plain", "404");
 }
-
-void handleDelete() {
-  if (server.hasArg("file")) {
-    LittleFS.remove("/" + server.arg("file"));
-    server.send(200, "text/plain", "Deleted");
-  } else server.send(400, "text/plain", "Missing args");
-}
+void handleDelete() { if (server.hasArg("file")) { LittleFS.remove("/" + server.arg("file")); server.send(200, "text/plain", "Deleted"); } }
 
 // =========================================================================
 // FUNGSI OLED & LOGGER
 // =========================================================================
-void setOLEDContrast(uint8_t contrast) {
-  Wire.beginTransmission(0x3C);
-  Wire.write(0x00); Wire.write(0x81); Wire.write(contrast);
-  Wire.endTransmission();
-}
-
+void setOLEDContrast(uint8_t contrast) { Wire.beginTransmission(0x3C); Wire.write(0x00); Wire.write(0x81); Wire.write(contrast); Wire.endTransmission(); }
 void drawSignalBars(int satellites) {
-  int activeBars = 0;
-  if (satellites >= 3) activeBars = 1;
-  if (satellites >= 5) activeBars = 2;
-  if (satellites >= 7) activeBars = 3;
-  if (satellites >= 9) activeBars = 4;
-
-  for (int i = 0; i < activeBars; i++) {
-    int barHeight = 2 + (i * 2); 
-    display.fillRect(i * 5, 9 - barHeight, 3, barHeight, WHITE); 
-  }
+  int activeBars = 0; if (satellites >= 3) activeBars = 1; if (satellites >= 5) activeBars = 2;
+  if (satellites >= 7) activeBars = 3; if (satellites >= 9) activeBars = 4;
+  for (int i = 0; i < activeBars; i++) { int barHeight = 2 + (i * 2); display.fillRect(i * 5, 9 - barHeight, 3, barHeight, WHITE); }
 }
 
 void logGPSData() {
   if (isLogging && millis() - lastLogTime >= 1000) { 
-    lastLogTime = millis();
-    File f = LittleFS.open(currentLogFile, "a");
+    lastLogTime = millis(); File f = LittleFS.open(currentLogFile, "a");
     if (f) {
       int hour = gps.time.hour() + 7; int day = gps.date.day(); if (hour >= 24) { hour -= 24; day += 1; }
-      
-      double currentSpeed = gps.speed.kmph();
-      double currentAlt = gps.altitude.isValid() ? gps.altitude.meters() : 0.0;
+      double currentSpeed = gps.speed.kmph(); double currentAlt = gps.altitude.isValid() ? gps.altitude.meters() : 0.0;
       int sats = gps.satellites.value();
-      
-      if(gps.altitude.isValid()) {
-        if(currentAlt > maxAltitude) maxAltitude = currentAlt;
-        if(currentAlt < minAltitude) minAltitude = currentAlt;
-      }
-      
-      sumSpeed += currentSpeed;
-      speedCount++;
-      double avgSpeed = sumSpeed / speedCount;
-
-      int signalBar = 0;
-      if (sats >= 3) signalBar = 1; if (sats >= 5) signalBar = 2;
-      if (sats >= 7) signalBar = 3; if (sats >= 9) signalBar = 4;
-      
+      if(gps.altitude.isValid()) { if(currentAlt > maxAltitude) maxAltitude = currentAlt; if(currentAlt < minAltitude) minAltitude = currentAlt; }
+      sumSpeed += currentSpeed; speedCount++; double avgSpeed = sumSpeed / speedCount;
+      int signalBar = 0; if (sats >= 3) signalBar = 1; if (sats >= 5) signalBar = 2; if (sats >= 7) signalBar = 3; if (sats >= 9) signalBar = 4;
       char logLine[180];
       sprintf(logLine, "%02d/%02d/%04d,%02d:%02d:%02d,%.6f,%.6f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%d,%d,%.2f,%.2f,%.1f", 
-              day, gps.date.month(), gps.date.year(), 
-              hour, gps.time.minute(), gps.time.second(),
-              gps.location.lat(), gps.location.lng(), 
-              currentSpeed, topSpeed, avgSpeed, 
+              day, gps.date.month(), gps.date.year(), hour, gps.time.minute(), gps.time.second(),
+              gps.location.lat(), gps.location.lng(), currentSpeed, topSpeed, avgSpeed, 
               currentAlt, (maxAltitude == -9999.0 ? 0 : maxAltitude), (minAltitude == 9999.0 ? 0 : minAltitude), 
               sats, signalBar, currentVoltage, currentAmpere, moduleTemp);
-              
       f.println(logLine); f.close();
     }
   }
@@ -907,6 +685,7 @@ void setup() {
   Serial.begin(9600); 
   ss.begin(GPSBaud);
   
+  // FIX: SDA = D1, SCL = D2 Sesuai Wiring Anda
   Wire.begin(D1, D2); 
 
   pinMode(BuzzerPin, OUTPUT);
@@ -914,6 +693,9 @@ void setup() {
   noTone(BuzzerPin);
 
   pinMode(ButtonPin, INPUT_PULLUP); // Tombol Tactile di D4 (GPIO 2)
+  
+  pinMode(LedPin, OUTPUT);          // LED Indikator di D7 (GPIO 13)
+  digitalWrite(LedPin, LOW);        // Pastikan LED mati saat awal
 
   buzzerBeep(3, 100, 100); 
 
@@ -922,9 +704,7 @@ void setup() {
   }
 
   if (!LittleFS.begin()) {
-    if (LittleFS.format()) {
-      LittleFS.begin();
-    }
+    if (LittleFS.format()) { LittleFS.begin(); }
   }
 
   WiFi.mode(WIFI_AP);
@@ -936,11 +716,7 @@ void setup() {
   server.on("/setfreq", handleSetFreq);
   server.on("/startlog", handleStartLog);
   server.on("/stoplog", handleStopLog);
-  
-  server.on("/upload", HTTP_POST, []() {
-    server.send(200, "text/plain", "Upload Berhasil");
-  }, handleFileUpload);
-
+  server.on("/upload", HTTP_POST, []() { server.send(200, "text/plain", "Upload Berhasil"); }, handleFileUpload);
   server.on("/restart", handleRestart);
   server.on("/files", handleListFiles);
   server.on("/view", handleView);
@@ -951,7 +727,6 @@ void setup() {
   Serial.println(F("\n========================================"));
   Serial.println(F("SPEEDOMETER GPS IOT 'PENYU' SIAP"));
   Serial.println(F("========================================"));
-
   stateTimer = millis();
 }
 
@@ -966,17 +741,10 @@ void loop() {
 
   if (millis() - lastSerialDebugTime >= 2000) {
     lastSerialDebugTime = millis();
-    Serial.print(F("[GPS DEBUG] Satelit: "));
-    Serial.print(gps.satellites.value());
-    Serial.print(F(" | Lock: "));
-    Serial.print(gps.location.isValid() ? "YES" : "NO");
-    Serial.print(F(" | Lat: "));
-    Serial.print(gps.location.lat(), 6);
-    Serial.print(F(" | Lon: "));
-    Serial.print(gps.location.lng(), 6);
-    Serial.print(F(" | Speed: "));
-    Serial.print(gps.speed.kmph());
-    Serial.println(F(" KM/H"));
+    Serial.print(F("[GPS DEBUG] Satelit: ")); Serial.print(gps.satellites.value());
+    Serial.print(F(" | Lock: ")); Serial.print(gps.location.isValid() ? "YES" : "NO");
+    Serial.print(F(" | Lat: ")); Serial.print(gps.location.lat(), 6);
+    Serial.print(F(" | Speed: ")); Serial.print(gps.speed.kmph()); Serial.println(F(" KM/H"));
   }
 
   if (isWiFiEnabled) {
@@ -987,6 +755,38 @@ void loop() {
   
   int sats = gps.satellites.value();
   bool currentConnectionState = (sats >= 3);
+
+  // --- LOGIKA INDIKATOR LED (NON-BLOCKING) ---
+  if (!isScreenSaverEnabled || currentState == STATE_SLEEP) {
+    // 1. Layar Mati Total ATAU Screensaver dimatikan manual -> LED Off Total
+    digitalWrite(LedPin, LOW);
+    currentLedState = LOW; // Sync variable state
+  } 
+  else if (isLogging) {
+    // 2. Record Log -> Kedip Sangat Cepat (150ms Toggle)
+    if (millis() - lastLedTime >= 150) { 
+      lastLedTime = millis();
+      currentLedState = !currentLedState;
+      digitalWrite(LedPin, currentLedState);
+    }
+  } 
+  else if (sats < 3) {
+    // 3. GPS Searching -> Kedip perlahan dengan delay 5 detik
+    if (currentLedState == LOW && (millis() - lastLedTime >= 5000)) {
+      lastLedTime = millis();
+      currentLedState = HIGH;
+      digitalWrite(LedPin, currentLedState);
+    } else if (currentLedState == HIGH && (millis() - lastLedTime >= 100)) { // Menyala kilat 100ms
+      lastLedTime = millis();
+      currentLedState = LOW;
+      digitalWrite(LedPin, currentLedState);
+    }
+  } 
+  else {
+    // 4. GPS Lock (Satelit >= 3) -> Standby Nyala Terus
+    digitalWrite(LedPin, HIGH);
+    currentLedState = HIGH;
+  }
 
   // --- LOGIKA STABIL TACTILE BUTTON (PIN D4 / PULLUP) ---
   int reading = digitalRead(ButtonPin);
@@ -1006,27 +806,19 @@ void loop() {
           isWiFiEnabled = !isWiFiEnabled;
           if (isWiFiEnabled) {
             WiFi.forceSleepWake(); delay(10);
-            WiFi.mode(WIFI_AP);
-            WiFi.softAP(ssid, password);
-            customBeep(1, 600, 0, buzzerFreq); 
-            showPopup("WIFI ON");
+            WiFi.mode(WIFI_AP); WiFi.softAP(ssid, password);
+            customBeep(1, 600, 0, buzzerFreq); showPopup("WIFI ON");
           } else {
-            WiFi.mode(WIFI_OFF);
-            WiFi.forceSleepBegin(); delay(10);
-            customBeep(1, 100, 0, buzzerFreq); 
-            showPopup("WIFI OFF");
+            WiFi.mode(WIFI_OFF); WiFi.forceSleepBegin(); delay(10);
+            customBeep(1, 100, 0, buzzerFreq); showPopup("WIFI OFF");
           }
-          longPressHandled = true;
-          clickCount = 0; 
+          longPressHandled = true; clickCount = 0; 
         }
       }
     } else {
       if (buttonActive) {
         if (!longPressHandled) {
-          if (millis() - buttonPressStartTime < 3000) {
-            clickCount++;
-            multiClickTimer = millis();
-          }
+          if (millis() - buttonPressStartTime < 3000) { clickCount++; multiClickTimer = millis(); }
         }
         buttonActive = false;
       }
@@ -1037,50 +829,29 @@ void loop() {
   if (clickCount > 0 && (millis() - multiClickTimer > multiClickWindow) && !buttonActive) {
     if (clickCount == 1) {
       if (currentState == STATE_SCREENSAVER || currentState == STATE_SLEEP) {
-        currentState = STATE_SPEEDOMETER;
-        lastMoveTime = millis();
-        display.ssd1306_command(SSD1306_DISPLAYON);
-        setOLEDContrast(255);
-        display.clearDisplay();
-        showPopup("WAKE UP");
+        currentState = STATE_SPEEDOMETER; lastMoveTime = millis();
+        display.ssd1306_command(SSD1306_DISPLAYON); setOLEDContrast(255);
+        display.clearDisplay(); showPopup("WAKE UP");
       }
       buzzerBeep(1, 100, 0); 
     } 
     else if (clickCount == 2) {
       buzzerEnabled = !buzzerEnabled;
-      if (buzzerEnabled) {
-        customBeep(1, 150, 0, buzzerFreq); 
-        showPopup("BUZZER ON");
-      } else {
-        showPopup("BUZZER OFF"); 
-      }
+      if (buzzerEnabled) { customBeep(1, 150, 0, buzzerFreq); showPopup("BUZZER ON"); } else { showPopup("BUZZER OFF"); }
     }
     else if (clickCount == 3) {
-      if (!isLogging) {
-        startLoggerSystem();
-        customBeep(3, 100, 100, 2000); 
-        showPopup("LOG START");
-      } else {
-        stopLoggerSystem();
-        customBeep(3, 100, 100, 500); 
-        showPopup("LOG STOP");
-      }
+      if (!isLogging) { startLoggerSystem(); customBeep(3, 100, 100, 2000); showPopup("LOG START"); } 
+      else { stopLoggerSystem(); customBeep(3, 100, 100, 500); showPopup("LOG STOP"); }
     }
     else if (clickCount >= 5) {
       isScreenSaverEnabled = !isScreenSaverEnabled;
       if (isScreenSaverEnabled) {
-        customBeep(2, 100, 100, 1500); 
-        showPopup("SCR SAVER ON");
+        customBeep(2, 100, 100, 1500); showPopup("SCR SAVER ON");
       } else {
-        customBeep(2, 100, 100, 800); 
-        showPopup("SCR SAVER OFF");
-        
+        customBeep(2, 100, 100, 800); showPopup("SCR SAVER OFF");
         if(currentState == STATE_SCREENSAVER || currentState == STATE_SLEEP) {
-          currentState = STATE_SPEEDOMETER;
-          lastMoveTime = millis();
-          display.ssd1306_command(SSD1306_DISPLAYON);
-          setOLEDContrast(255);
-          display.clearDisplay();
+          currentState = STATE_SPEEDOMETER; lastMoveTime = millis();
+          display.ssd1306_command(SSD1306_DISPLAYON); setOLEDContrast(255); display.clearDisplay();
         }
       }
     }
@@ -1090,19 +861,11 @@ void loop() {
   if (!currentConnectionState) {
     if (millis() - lastBuzzerAlertTime >= 5000) {
       lastBuzzerAlertTime = millis();
-      if (buzzerEnabled) {
-        if (isActiveBuzzer) {
-          digitalWrite(BuzzerPin, HIGH); delay(600); digitalWrite(BuzzerPin, LOW);
-        } else {
-          tone(BuzzerPin, buzzerFreq, 600);
-        }
-      }
+      if (buzzerEnabled) { if (isActiveBuzzer) { digitalWrite(BuzzerPin, HIGH); delay(600); digitalWrite(BuzzerPin, LOW); } else { tone(BuzzerPin, buzzerFreq, 600); } }
     }
   } 
 
-  if (currentConnectionState && !lastConnectionState) {
-    buzzerBeep(1, 200, 0); 
-  } 
+  if (currentConnectionState && !lastConnectionState) { buzzerBeep(1, 200, 0); } 
   lastConnectionState = currentConnectionState;
 
   if (sats >= 3) {
@@ -1113,9 +876,7 @@ void loop() {
     if (gps.altitude.isValid()) {
       double currentAlt = gps.altitude.meters();
       if (millis() - lastAltTime > 2000) {
-        if (currentAlt > lastAltitude + 0.5) altTrend = 24;      
-        else if (currentAlt < lastAltitude - 0.5) altTrend = 25; 
-        else altTrend = '-';                                     
+        if (currentAlt > lastAltitude + 0.5) altTrend = 24; else if (currentAlt < lastAltitude - 0.5) altTrend = 25; else altTrend = '-';                                     
         lastAltitude = currentAlt; lastAltTime = millis();
       }
     }
@@ -1128,43 +889,28 @@ void loop() {
       display.setCursor(15, 10); display.print("System Booting...");
 
       unsigned long elapsed = millis() - stateTimer;
-      int progressWidth = map(elapsed, 0, 1500, 0, 100);
-      if (progressWidth > 100) progressWidth = 100;
+      int progressWidth = map(elapsed, 0, 1500, 0, 100); if (progressWidth > 100) progressWidth = 100;
 
-      display.drawRect(14, 30, 100, 12, WHITE);
-      display.fillRect(16, 32, progressWidth - 4, 8, WHITE);
-      display.display();
+      display.drawRect(14, 30, 100, 12, WHITE); display.fillRect(16, 32, progressWidth - 4, 8, WHITE); display.display();
 
-      if (elapsed >= 1500) {
-        currentState = STATE_WELCOME; stateTimer = millis(); setOLEDContrast(0); 
-      }
+      if (elapsed >= 1500) { currentState = STATE_WELCOME; stateTimer = millis(); setOLEDContrast(0); }
       break;
     }
 
     case STATE_WELCOME: {
       unsigned long elapsed = millis() - stateTimer;
-      display.clearDisplay();
-      display.drawBitmap(0, 0, epd_bitmap_PENYUPUTIH, 128, 64, WHITE);
-      display.display();
-
-      if (elapsed <= 2000) {
-        setOLEDContrast(map(elapsed, 0, 2000, 0, 255));
-      } else if (elapsed >= 3000) {
-        setOLEDContrast(255); currentState = STATE_TITLE; stateTimer = millis();
-      }
+      display.clearDisplay(); display.drawBitmap(0, 0, epd_bitmap_PENYUPUTIH, 128, 64, WHITE); display.display();
+      if (elapsed <= 2000) { setOLEDContrast(map(elapsed, 0, 2000, 0, 255)); } 
+      else if (elapsed >= 3000) { setOLEDContrast(255); currentState = STATE_TITLE; stateTimer = millis(); }
       break;
     }
 
     case STATE_TITLE: {
-      display.clearDisplay(); display.setTextSize(2);
-      display.setCursor(45, 10); display.print("GPS");
+      display.clearDisplay(); display.setTextSize(2); display.setCursor(45, 10); display.print("GPS");
       display.setTextSize(1); display.setCursor(30, 32); display.print("SPEEDOMETER");
-      display.setCursor(28, 48); display.print("Satuan: KM/H");
-      display.display();
+      display.setCursor(28, 48); display.print("Satuan: KM/H"); display.display();
 
-      if (millis() - stateTimer >= 2500) {
-        currentState = STATE_CONNECTING; lastDisplayUpdate = millis();
-      }
+      if (millis() - stateTimer >= 2500) { currentState = STATE_CONNECTING; lastDisplayUpdate = millis(); }
       break;
     }
 
@@ -1173,26 +919,15 @@ void loop() {
         lastDisplayUpdate = millis(); display.clearDisplay(); display.setTextSize(1);
         display.setCursor(18, 0); display.print("Mencari Sinyal");
         
-        int cx = 64, cy = 28; 
-        int r1 = (millis() / 40) % 20; 
-        int r2 = (r1 + 10) % 20; 
-        
-        display.fillCircle(cx, cy, 2, WHITE); 
-        display.drawCircle(cx, cy, r1, WHITE);
-        display.drawCircle(cx, cy, r2, WHITE);
-
+        int cx = 64, cy = 28; int r1 = (millis() / 40) % 20; int r2 = (r1 + 10) % 20; 
+        display.fillCircle(cx, cy, 2, WHITE); display.drawCircle(cx, cy, r1, WHITE); display.drawCircle(cx, cy, r2, WHITE);
         display.setCursor(10, 52); display.print("Satelit Ditemukan: "); display.print(sats);
         
         if (millis() - popupTimer < POPUP_DURATION && popupMsg != "") {
-          int16_t x1, y1; uint16_t w, h;
-          display.setTextSize(1); display.getTextBounds(popupMsg, 0, 0, &x1, &y1, &w, &h);
-          int px = (128 - w) / 2 - 4, py = (64 - h) / 2 - 4;
-          display.fillRect(px, py, w + 8, h + 8, WHITE);
-          display.setTextColor(BLACK);
-          display.setCursor((128 - w) / 2, (64 - h) / 2); display.print(popupMsg);
-          display.setTextColor(WHITE);
+          int16_t x1, y1; uint16_t w, h; display.setTextSize(1); display.getTextBounds(popupMsg, 0, 0, &x1, &y1, &w, &h);
+          int px = (128 - w) / 2 - 4, py = (64 - h) / 2 - 4; display.fillRect(px, py, w + 8, h + 8, WHITE);
+          display.setTextColor(BLACK); display.setCursor((128 - w) / 2, (64 - h) / 2); display.print(popupMsg); display.setTextColor(WHITE);
         }
-
         display.display();
       }
       if (sats >= 3) { currentState = STATE_SPEEDOMETER; lastMoveTime = millis(); }
@@ -1200,129 +935,83 @@ void loop() {
     }
 
     case STATE_SPEEDOMETER: {
-      double currentSpeed = gps.speed.kmph();
-      if (currentSpeed < 1.0) currentSpeed = 0.0;
+      double currentSpeed = gps.speed.kmph(); if (currentSpeed < 1.0) currentSpeed = 0.0;
 
       if (currentSpeed > 0.0) lastMoveTime = millis(); 
-      else if (isScreenSaverEnabled && (millis() - lastMoveTime > 4000)) {
-        currentState = STATE_SCREENSAVER; screensaverStartTime = millis(); 
-        display.clearDisplay(); break;
-      }
+      else if (isScreenSaverEnabled && (millis() - lastMoveTime > 4000)) { currentState = STATE_SCREENSAVER; screensaverStartTime = millis(); display.clearDisplay(); break; }
 
       if (millis() - lastDisplayUpdate > 100) {
         lastDisplayUpdate = millis(); display.clearDisplay();
-
         if (sats < 3) { currentState = STATE_CONNECTING; break; }
 
-        int hour = gps.time.hour() + 7; int day = gps.date.day(); int month = gps.date.month();
-        if (hour >= 24) { hour -= 24; day += 1; }
-
+        int hour = gps.time.hour() + 7; int day = gps.date.day(); int month = gps.date.month(); if (hour >= 24) { hour -= 24; day += 1; }
         char timeString[6]; char dateString[6];
-        sprintf(timeString, "%02d:%02d", hour, gps.time.minute());
-        sprintf(dateString, "%02d/%02d", day, month);
+        sprintf(timeString, "%02d:%02d", hour, gps.time.minute()); sprintf(dateString, "%02d/%02d", day, month);
 
         drawSignalBars(sats); display.setTextSize(1);
         display.setCursor(45, 1); if (gps.time.isValid()) display.print(timeString); else display.print("--:--");
-        display.setCursor(92, 1); display.print("Sat:"); display.print(sats);
-        display.drawLine(0, 11, 128, 11, WHITE); 
+        display.setCursor(92, 1); display.print("Sat:"); display.print(sats); display.drawLine(0, 11, 128, 11, WHITE); 
 
         int speedInt = (int)currentSpeed; display.setTextSize(5); 
 
         if (speedInt < 10) {
           display.setCursor(25, 20); display.print(speedInt);
-
           int rightX = 95; display.setTextSize(1); 
-          display.setCursor(rightX, 14); display.print("MAX");
-          display.setCursor(rightX, 23); display.print((int)topSpeed);
-
-          display.setCursor(rightX, 34); display.print("MDPL");
-          display.setCursor(rightX, 43);
+          display.setCursor(rightX, 14); display.print("MAX"); display.setCursor(rightX, 23); display.print((int)topSpeed);
+          display.setCursor(rightX, 34); display.print("MDPL"); display.setCursor(rightX, 43);
           if (gps.altitude.isValid()) { display.print(altTrend); display.print((int)gps.altitude.meters()); } else display.print("-");
-          display.setCursor(rightX, 54);
-          if (gps.date.isValid()) display.print(dateString); else display.print("--/--");
-
+          display.setCursor(rightX, 54); if (gps.date.isValid()) display.print(dateString); else display.print("--/--");
         } else {
-          if (speedInt < 100) display.setCursor(34, 20); else display.setCursor(19, 20);
-          display.print(speedInt);
+          if (speedInt < 100) display.setCursor(34, 20); else display.setCursor(19, 20); display.print(speedInt);
         }
 
         if (millis() - popupTimer < POPUP_DURATION && popupMsg != "") {
-          int16_t x1, y1; uint16_t w, h;
-          display.setTextSize(1); display.getTextBounds(popupMsg, 0, 0, &x1, &y1, &w, &h);
-          int px = (128 - w) / 2 - 4, py = (64 - h) / 2 - 4;
-          display.fillRect(px, py, w + 8, h + 8, WHITE);
-          display.setTextColor(BLACK);
-          display.setCursor((128 - w) / 2, (64 - h) / 2); display.print(popupMsg);
-          display.setTextColor(WHITE);
+          int16_t x1, y1; uint16_t w, h; display.setTextSize(1); display.getTextBounds(popupMsg, 0, 0, &x1, &y1, &w, &h);
+          int px = (128 - w) / 2 - 4, py = (64 - h) / 2 - 4; display.fillRect(px, py, w + 8, h + 8, WHITE);
+          display.setTextColor(BLACK); display.setCursor((128 - w) / 2, (64 - h) / 2); display.print(popupMsg); display.setTextColor(WHITE);
         }
-
         display.display();
       }
       break;
     }
 
     case STATE_SCREENSAVER: {
-      double currentSpeed = gps.speed.kmph();
-      if (currentSpeed < 1.0) currentSpeed = 0.0;
+      double currentSpeed = gps.speed.kmph(); if (currentSpeed < 1.0) currentSpeed = 0.0;
       
-      if (currentSpeed > 0.0) {
-        lastMoveTime = millis(); setOLEDContrast(255); currentState = STATE_SPEEDOMETER;
-        display.clearDisplay(); break;
-      }
-
-      if (isScreenSaverEnabled && (millis() - screensaverStartTime > 30000)) {
-        currentState = STATE_SLEEP; display.clearDisplay();
-        display.ssd1306_command(SSD1306_DISPLAYOFF); break;
-      }
+      if (currentSpeed > 0.0) { lastMoveTime = millis(); setOLEDContrast(255); currentState = STATE_SPEEDOMETER; display.clearDisplay(); break; }
+      if (isScreenSaverEnabled && (millis() - screensaverStartTime > 30000)) { currentState = STATE_SLEEP; display.clearDisplay(); display.ssd1306_command(SSD1306_DISPLAYOFF); break; }
 
       if (millis() - lastDisplayUpdate > 200) { 
         lastDisplayUpdate = millis(); display.clearDisplay();
-
         if (sats < 3) { currentState = STATE_CONNECTING; break; }
 
-        int hour = gps.time.hour() + 7; int day = gps.date.day(); int month = gps.date.month();
-        if (hour >= 24) { hour -= 24; day += 1; }
-
+        int hour = gps.time.hour() + 7; int day = gps.date.day(); int month = gps.date.month(); if (hour >= 24) { hour -= 24; day += 1; }
         char timeString[6]; char dateStringLong[11]; char dateStringShort[6];
-        sprintf(timeString, "%02d:%02d", hour, gps.time.minute());
-        sprintf(dateStringLong, "%02d/%02d/%04d", day, month, gps.date.year());
-        sprintf(dateStringShort, "%02d/%02d", day, month);
+        sprintf(timeString, "%02d:%02d", hour, gps.time.minute()); sprintf(dateStringLong, "%02d/%02d/%04d", day, month, gps.date.year()); sprintf(dateStringShort, "%02d/%02d", day, month);
 
-        unsigned long carouselTimer = (millis() - screensaverStartTime) % 15000;
-        int page = carouselTimer / 3000; 
+        unsigned long carouselTimer = (millis() - screensaverStartTime) % 15000; int page = carouselTimer / 3000; 
 
         if (page == 0) display.drawBitmap(0, 0, epd_bitmap_PENYUPUTIH, 128, 64, WHITE);
         else if (page == 1) {
-          drawSignalBars(sats); display.setTextSize(1); display.setCursor(92, 1); display.print("Sat:"); display.print(sats);
-          display.drawLine(0, 11, 128, 11, WHITE);
+          drawSignalBars(sats); display.setTextSize(1); display.setCursor(92, 1); display.print("Sat:"); display.print(sats); display.drawLine(0, 11, 128, 11, WHITE);
           display.setTextSize(3); display.setCursor(19, 20); if (gps.time.isValid()) display.print(timeString); else display.print("--:--");
           display.setTextSize(1); display.setCursor(35, 52); if (gps.date.isValid()) display.print(dateStringLong); else display.print("--/--/----");
         } 
         else if (page == 2) {
-          display.setTextSize(2); display.setCursor(0, 5); display.print("Alt:");
-          if (gps.altitude.isValid()) display.print((int)gps.altitude.meters()); else display.print("-"); display.print(" m");
-          display.setTextSize(1); display.setCursor(0, 32); display.print("Lat: ");
-          if (gps.location.isValid()) display.print(gps.location.lat(), 6); else display.print("Mencari...");
-          display.setCursor(0, 48); display.print("Lon: ");
-          if (gps.location.isValid()) display.print(gps.location.lng(), 6); else display.print("Mencari...");
+          display.setTextSize(2); display.setCursor(0, 5); display.print("Alt:"); if (gps.altitude.isValid()) display.print((int)gps.altitude.meters()); else display.print("-"); display.print(" m");
+          display.setTextSize(1); display.setCursor(0, 32); display.print("Lat: "); if (gps.location.isValid()) display.print(gps.location.lat(), 6); else display.print("Mencari...");
+          display.setCursor(0, 48); display.print("Lon: "); if (gps.location.isValid()) display.print(gps.location.lng(), 6); else display.print("Mencari...");
         }
         else if (page == 3) {
-          display.setTextSize(1);
-          display.setCursor(0, 2); display.print("POWER & TEMP STATUS");
-          display.drawLine(0, 11, 128, 11, WHITE);
-
+          display.setTextSize(1); display.setCursor(0, 2); display.print("POWER & TEMP STATUS"); display.drawLine(0, 11, 128, 11, WHITE);
           display.setCursor(0, 18); display.print("Voltage : "); display.print(currentVoltage, 1); display.print(" V");
           display.setCursor(0, 32); display.print("Current : "); display.print(currentAmpere, 2); display.print(" A");
           display.setCursor(0, 48); display.print("Temp    : "); display.print(moduleTemp, 1); display.print(" C");
         }
         else if (page == 4) {
-          drawSignalBars(sats); display.setTextSize(1); display.setCursor(45, 1); 
-          if (gps.time.isValid()) display.print(timeString); else display.print("--:--");
-          display.setCursor(92, 1); display.print("Sat:"); display.print(sats);
-          display.drawLine(0, 11, 128, 11, WHITE); 
-
+          drawSignalBars(sats); display.setTextSize(1); display.setCursor(45, 1); if (gps.time.isValid()) display.print(timeString); else display.print("--:--");
+          display.setCursor(92, 1); display.print("Sat:"); display.print(sats); display.drawLine(0, 11, 128, 11, WHITE); 
           display.setTextSize(5); display.setCursor(25, 20); display.print((int)currentSpeed); 
-
           int rightX = 95; display.setTextSize(1); 
           display.setCursor(rightX, 14); display.print("MAX"); display.setCursor(rightX, 23); display.print((int)topSpeed);
           display.setCursor(rightX, 34); display.print("MDPL"); display.setCursor(rightX, 43);
@@ -1331,27 +1020,19 @@ void loop() {
         }
         
         if (millis() - popupTimer < POPUP_DURATION && popupMsg != "") {
-          int16_t x1, y1; uint16_t w, h;
-          display.setTextSize(1); display.getTextBounds(popupMsg, 0, 0, &x1, &y1, &w, &h);
-          int px = (128 - w) / 2 - 4, py = (64 - h) / 2 - 4;
-          display.fillRect(px, py, w + 8, h + 8, WHITE);
-          display.setTextColor(BLACK);
-          display.setCursor((128 - w) / 2, (64 - h) / 2); display.print(popupMsg);
-          display.setTextColor(WHITE);
+          int16_t x1, y1; uint16_t w, h; display.setTextSize(1); display.getTextBounds(popupMsg, 0, 0, &x1, &y1, &w, &h);
+          int px = (128 - w) / 2 - 4, py = (64 - h) / 2 - 4; display.fillRect(px, py, w + 8, h + 8, WHITE);
+          display.setTextColor(BLACK); display.setCursor((128 - w) / 2, (64 - h) / 2); display.print(popupMsg); display.setTextColor(WHITE);
         }
-
         display.display();
       }
       break;
     }
 
     case STATE_SLEEP: {
-      double currentSpeed = gps.speed.kmph();
-      if (currentSpeed < 1.0) currentSpeed = 0.0;
-
+      double currentSpeed = gps.speed.kmph(); if (currentSpeed < 1.0) currentSpeed = 0.0;
       if (currentSpeed > 0.0) {
-        lastMoveTime = millis(); display.ssd1306_command(SSD1306_DISPLAYON); 
-        setOLEDContrast(255); currentState = STATE_SPEEDOMETER; display.clearDisplay();
+        lastMoveTime = millis(); display.ssd1306_command(SSD1306_DISPLAYON); setOLEDContrast(255); currentState = STATE_SPEEDOMETER; display.clearDisplay();
       }
       break;
     }
