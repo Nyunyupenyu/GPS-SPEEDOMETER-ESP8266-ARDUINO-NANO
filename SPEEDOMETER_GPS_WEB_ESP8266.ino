@@ -1,6 +1,6 @@
 /*
  * Projek: Speedometer GPS IoT "Penyu" + Racing Dashboard
- * Versi Final (V2.49): Hapus Total Telemetri Voltage, Ampere, Temp dari Seluruh Sistem
+ * Versi Final (V2.54): Fix JavaScript ReferenceError (buzzerEnabled)
  * Hardware: ESP8266, GPS NEO-6M, OLED SSD1306, Tactile Button (D4), Buzzer (D8), LED (D7)
  */
 
@@ -55,10 +55,9 @@ int buzzerFreq = 500;
 unsigned long lastLedTime = 0; 
 bool currentLedState = LOW;
 
-// Variabel Proteksi Delay 10 Detik untuk LED setelah OLED / Fitur Aktif
 unsigned long oledWakeEventTime = 0; 
 
-// Variabel Kontrol Sistem
+// --- VARIABEL KONTROL SISTEM ---
 bool isScreenSaverEnabled = true;
 String popupMsg = "";
 unsigned long popupTimer = 0;
@@ -151,7 +150,6 @@ const unsigned char epd_bitmap_PENYUPUTIH [] PROGMEM = {
   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
-  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
 };
 
@@ -189,20 +187,13 @@ void showPopup(String msg) {
 // =========================================================================
 void startLoggerSystem() {
   char fname[30];
-  if (gps.date.isValid() && gps.time.isValid()) {
-    int hour = gps.time.hour() + 7; int day = gps.date.day(); 
-    if (hour >= 24) { hour -= 24; day += 1; }
-    sprintf(fname, "/log_%02d%02d%04d_%02d%02d.csv", day, gps.date.month(), gps.date.year(), hour, gps.time.minute());
-  } else {
-    sprintf(fname, "/log_%lu.csv", millis());
-  }
+  sprintf(fname, "/log_%lu.csv", millis());
   
   currentLogFile = String(fname);
   sumSpeed = 0.0; speedCount = 0; minAltitude = 9999.0; maxAltitude = -9999.0;
   
   File f = LittleFS.open(currentLogFile, "w");
   if (f) {
-    // Header CSV tanpa volt, amp, temp
     f.println("Date,Time,Latitude,Longitude,Speed(KMH),TopSpeed(KMH),AvgSpeed(KMH),Altitude(m),MaxAlt(m),MinAlt(m),Satellites,SignalBar");
     f.close(); isLogging = true;
   } else {
@@ -382,6 +373,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
     let currentReplayData = [];
     let replayIndex = 0;
     let lastLoggingState = false;
+    let clientBuzzerState = true; // State lokal buzzer untuk web
 
     function renderUI(d) {
       document.getElementById('spd').innerText = Math.round(d.spd);
@@ -409,8 +401,9 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       document.getElementById('bar-alt').style.width = Math.min((parseFloat(d.alt)/2000)*100, 100) + '%'; 
       document.getElementById('bar-sat').style.width = Math.min((parseInt(d.sat)/12)*100, 100) + '%'; 
       
+      clientBuzzerState = d.buzzerState;
       let btn = document.getElementById('buzzerToggleBtn');
-      if(d.buzzerState) {
+      if(clientBuzzerState) {
         btn.innerText = "ON";
         btn.className = "toggle-on";
       } else {
@@ -423,6 +416,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
     function setBuzzerFreq(val) { fetch('/setfreq?val=' + val); }
     function toggleBuzzerState() {
       fetch('/togglebuzzer').then(r => r.json()).then(d => {
+        clientBuzzerState = d.state;
         let btn = document.getElementById('buzzerToggleBtn');
         if(d.state) { btn.innerText = "ON"; btn.className = "toggle-on"; } 
         else { btn.innerText = "OFF"; btn.className = "toggle-off"; }
@@ -442,6 +436,8 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       const w = canvas.width, h = canvas.height;
       ctx.clearRect(0, 0, w, h);
 
+      if(!dataArray || dataArray.length === 0) return;
+
       let maxVal = 10;
       dataArray.forEach(row => { 
         if(row && row.length > colIdx) {
@@ -451,23 +447,28 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       });
 
       ctx.beginPath(); ctx.strokeStyle = strokeColor; ctx.lineWidth = 2;
-      for(let i=0; i<dataArray.length; i++) {
-        let x = (i / (dataArray.length - 1)) * w;
+      let denom = (dataArray.length > 1) ? (dataArray.length - 1) : 1;
+      
+      for(let i = 0; i < dataArray.length; i++) {
+        let x = (i / denom) * w;
         let y = h - 5; 
         if(dataArray[i] && dataArray[i].length > colIdx) {
           let v = parseFloat(dataArray[i][colIdx]);
           if(!isNaN(v)) { y = h - ((v / maxVal) * (h - 10)) - 5; }
         }
-        if(i===0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        if(i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
       }
       ctx.stroke();
 
-      if(currentIndex >= 0 && dataArray.length > 1 && dataArray[currentIndex] && dataArray[currentIndex].length > colIdx) {
-        let px = (currentIndex / (dataArray.length - 1)) * w;
+      if(currentIndex >= 0 && dataArray[currentIndex] && dataArray[currentIndex].length > colIdx) {
+        let px = (currentIndex / denom) * w;
         ctx.beginPath(); ctx.strokeStyle = '#ff0055'; ctx.lineWidth = 2;
         ctx.moveTo(px, 0); ctx.lineTo(px, h); ctx.stroke();
         ctx.fillStyle = '#fff'; ctx.font = '10px Arial';
-        ctx.fillText(Math.round(dataArray[currentIndex][colIdx]), px > w - 30 ? px - 30 : px + 5, 12);
+        let valNum = parseFloat(dataArray[currentIndex][colIdx]);
+        if(!isNaN(valNum)) {
+          ctx.fillText(Math.round(valNum), px > w - 30 ? px - 30 : px + 5, 12);
+        }
       }
     }
 
@@ -537,11 +538,22 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       document.getElementById('timeSlider').value = replayIndex;
       let row = currentReplayData[replayIndex];
       
-      if(!row || row.length < 11) return; 
+      if(!row || row.length < 5) return; 
       
       let d = {
-        date: row[0], time: row[1], lat: row[2], lon: row[3], spd: row[4], max: row[5], avg: row[6], alt: row[7],
-        sat: row[10], ram: 0, rom: 0, cpu: 'Replay', buzzerState: buzzerEnabled
+        date: row[0] || "--/--/----", 
+        time: row[1] || "--:--:--", 
+        lat: row[2] || "0.0", 
+        lon: row[3] || "0.0", 
+        spd: row[4] || "0", 
+        max: row[5] || row[4] || "0", 
+        avg: row[6] || row[4] || "0", 
+        alt: row[7] || "0",
+        sat: row[10] || "0", 
+        ram: 0, 
+        rom: 0, 
+        cpu: 'Replay', 
+        buzzerState: clientBuzzerState
       };
       
       renderUI(d); 
@@ -549,40 +561,66 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
     }
 
     function playReplay(fileName) {
-      clearInterval(liveInterval); isReplaying = true;
-      document.getElementById('logStatus').innerText = "REPLAYING"; document.getElementById('logStatus').style.color = "#00d2ff";
+      clearInterval(liveInterval); 
+      isReplaying = true;
+      document.getElementById('logStatus').innerText = "REPLAYING"; 
+      document.getElementById('logStatus').style.color = "#00d2ff";
       
-      fetch('/view?file=' + fileName + '&t=' + Date.now()) 
-        .then(response => response.text())
+      fetch('/view?file=' + encodeURIComponent(fileName) + '&t=' + Date.now()) 
+        .then(response => {
+          if (!response.ok) throw new Error("Gagal mengambil file log");
+          return response.text();
+        })
         .then(csv => {
-          let lines = csv.split('\n').filter(line => line.trim().length > 0);
-          if(lines.length <= 1) { alert("Log kosong atau belum ada data masuk!"); stopReplay(); return; }
+          let lines = csv.split(/\r?\n/).filter(line => line.trim().length > 0);
+          if(lines.length === 0) { 
+            alert("Log kosong!"); 
+            stopReplay(); 
+            return; 
+          }
           
+          let firstLineLower = lines[0].toLowerCase();
+          let hasHeader = firstLineLower.includes('date') || firstLineLower.includes('speed') || firstLineLower.includes('lat');
+          let startIndex = hasHeader ? 1 : 0;
+
           currentReplayData = []; 
-          for(let i=1; i<lines.length; i++){ 
-            let cols = lines[i].split(',');
-            if(cols.length >= 11) {
+          for(let i = startIndex; i < lines.length; i++){ 
+            let cols = lines[i].split(',').map(c => c.trim());
+            if(cols.length >= 5) {
               currentReplayData.push(cols); 
             }
           }
           
-          if(currentReplayData.length === 0) { alert("Data log rusak atau tidak valid!"); stopReplay(); return; }
+          if(currentReplayData.length === 0) { 
+            alert("Data log tidak valid atau rusak!"); 
+            stopReplay(); 
+            return; 
+          }
 
           replayIndex = 0;
           document.getElementById('replayControls').style.display = 'block';
-          document.getElementById('timeSlider').max = currentReplayData.length - 1; 
-          document.getElementById('timeSlider').value = 0;
+          let slider = document.getElementById('timeSlider');
+          slider.max = currentReplayData.length - 1; 
+          slider.value = 0;
           
           if(replayInterval) clearInterval(replayInterval);
           processReplayFrame();
           
           replayInterval = setInterval(() => {
             replayIndex++;
-            if(replayIndex >= currentReplayData.length) { stopReplay(); alert("Replay Selesai"); return; }
+            if(replayIndex >= currentReplayData.length) { 
+              stopReplay(); 
+              alert("Replay Selesai"); 
+              return; 
+            }
             processReplayFrame();
           }, 1000); 
         })
-        .catch(err => { alert("Gagal Load Replay!"); stopReplay(); });
+        .catch(err => { 
+          console.error(err);
+          alert("Gagal Load Replay: " + err.message); 
+          stopReplay(); 
+        });
     }
 
     document.getElementById('timeSlider').addEventListener('input', function() { replayIndex = parseInt(this.value); processReplayFrame(); });
@@ -666,7 +704,18 @@ void handleListFiles() {
   json += "]"; server.send(200, "application/json", json);
 }
 void handleView() {
-  if (server.hasArg("file")) { String path = "/" + server.arg("file"); if (LittleFS.exists(path)) { File file = LittleFS.open(path, "r"); server.streamFile(file, "text/plain"); file.close(); return; } }
+  if (server.hasArg("file")) { 
+    String path = "/" + server.arg("file"); 
+    if (LittleFS.exists(path)) { 
+      File file = LittleFS.open(path, "r"); 
+      if (file) {
+        String content = file.readString();
+        file.close();
+        server.send(200, "text/plain", content);
+        return;
+      }
+    } 
+  }
   server.send(404, "text/plain", "404");
 }
 void handleDownload() {
@@ -714,17 +763,15 @@ void setup() {
   Serial.begin(9600); 
   ss.begin(GPSBaud);
   
-  // SDA = D1, SCL = D2 Sesuai Wiring Anda
   Wire.begin(D1, D2); 
 
   pinMode(BuzzerPin, OUTPUT);
   digitalWrite(BuzzerPin, LOW);
   noTone(BuzzerPin);
 
-  pinMode(ButtonPin, INPUT_PULLUP); // Tombol Tactile di D4 (GPIO 2)
-  
-  pinMode(LedPin, OUTPUT);          // LED Indikator di D7 (GPIO 13)
-  digitalWrite(LedPin, LOW);        // Pastikan LED mati saat awal (Proteksi OLED)
+  pinMode(ButtonPin, INPUT_PULLUP); 
+  pinMode(LedPin, OUTPUT);          
+  digitalWrite(LedPin, LOW);        
 
   buzzerBeep(3, 100, 100); 
 
@@ -736,7 +783,6 @@ void setup() {
     if (LittleFS.format()) { LittleFS.begin(); }
   }
 
-  // WiFi Default ON saat Boot
   WiFi.mode(WIFI_AP);
   WiFi.softAP(ssid, password);
   
@@ -881,7 +927,7 @@ void loop() {
     clickCount = 0;
   }
 
-  // --- BUZZER ALERT SAAT PENCARIAN GPS (Jeda 10 Detik Sekali) ---
+  // --- BUZZER ALERT SAAT PENCARIAN GPS ---
   if (!currentConnectionState) {
     if (millis() - lastBuzzerAlertTime >= 10000) {
       lastBuzzerAlertTime = millis();
