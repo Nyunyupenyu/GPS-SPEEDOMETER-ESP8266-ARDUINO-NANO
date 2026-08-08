@@ -1,6 +1,6 @@
 /*
- * Projek: Speedometer GPS IoT "Penyu" + Racing Dashboard + Power/Temp Monitor
- * Versi Final (V2.46): Screen Saver 10s & Sleep Mode 2 min from Screen Saver + All Previous Fixes
+ * Projek: Speedometer GPS IoT "Penyu" + Racing Dashboard
+ * Versi Final (V2.49): Hapus Total Telemetri Voltage, Ampere, Temp dari Seluruh Sistem
  * Hardware: ESP8266, GPS NEO-6M, OLED SSD1306, Tactile Button (D4), Buzzer (D8), LED (D7)
  */
 
@@ -95,11 +95,6 @@ File fsUploadFile;
 unsigned long lastBuzzerAlertTime = 0;
 bool lastConnectionState = false;
 
-// --- DATA TELEMETRI DAYA & SUHU ---
-float currentVoltage = 12.4; 
-float currentAmpere = 0.85;  
-float moduleTemp = 38.5;     
-
 // --- DATA GAMBAR LOGO PENYU (128x64) ---
 const unsigned char epd_bitmap_PENYUPUTIH [] PROGMEM = {
   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
@@ -148,6 +143,8 @@ const unsigned char epd_bitmap_PENYUPUTIH [] PROGMEM = {
   0x00, 0x00, 0x00, 0x00, 0x00, 0x7f, 0xff, 0x80, 0x1f, 0xff, 0xfe, 0x00, 0x00, 0x00, 0x00, 0x00, 
   0x00, 0x00, 0x00, 0x00, 0x00, 0x07, 0xff, 0xff, 0x7f, 0xff, 0x60, 0x00, 0x00, 0x00, 0x00, 0x00, 
   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0xfe, 0x7f, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
@@ -205,7 +202,8 @@ void startLoggerSystem() {
   
   File f = LittleFS.open(currentLogFile, "w");
   if (f) {
-    f.println("Date,Time,Latitude,Longitude,Speed(KMH),TopSpeed(KMH),AvgSpeed(KMH),Altitude(m),MaxAlt(m),MinAlt(m),Satellites,SignalBar,Voltage(V),Current(A),Temp(C)");
+    // Header CSV tanpa volt, amp, temp
+    f.println("Date,Time,Latitude,Longitude,Speed(KMH),TopSpeed(KMH),AvgSpeed(KMH),Altitude(m),MaxAlt(m),MinAlt(m),Satellites,SignalBar");
     f.close(); isLogging = true;
   } else {
     isLogging = false;
@@ -232,7 +230,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
     
     .btn-restart-top { position: absolute; top: 12px; right: 15px; background: #ff8800; color: #fff; border: none; padding: 5px 10px; font-size: 11px; font-weight: bold; border-radius: 4px; cursor: pointer; text-transform: uppercase; }
 
-    .sys-stats { display: flex; justify-content: space-around; background: #151515; padding: 8px; border-radius: 6px; margin-bottom: 5px; font-size: 11px; border: 1px dashed #333; }
+    .sys-stats { display: flex; justify-content: space-around; background: #151515; padding: 8px; border-radius: 6px; margin-bottom: 12px; font-size: 11px; border: 1px dashed #333; }
     .stat-item span { color: #00ff88; font-weight: bold; }
 
     .gauge-container { position: relative; width: 240px; height: 130px; margin: 10px auto 0; }
@@ -282,14 +280,8 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
     <button class="btn-restart-top" onclick="restartDevice()">RESTART</button>
     
     <h2>DASHBOARD <span id="logStatus" style="font-size:12px; color:#00ff88; margin-left: 10px;">LIVE</span></h2>
-    
-    <div class="sys-stats" style="background: #1a1a1a;">
-      <div class="stat-item">VOLT: <span id="webVolt" style="color: #ffaa00;">0.0</span>V</div>
-      <div class="stat-item">AMP: <span id="webAmp" style="color: #ffaa00;">0.0</span>A</div>
-      <div class="stat-item">SUHU: <span id="webTemp" style="color: #ffaa00;">0.0</span>&deg;C</div>
-    </div>
 
-    <div class="sys-stats" style="margin-bottom: 12px;">
+    <div class="sys-stats">
       <div class="stat-item">RAM: <span id="ramUsage">0%</span></div>
       <div class="stat-item">ROM: <span id="romUsage">0%</span></div>
       <div class="stat-item">CPU: <span id="cpuUsage">Low</span></div>
@@ -412,10 +404,6 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       document.getElementById('romUsage').innerText = d.rom + '%';
       document.getElementById('cpuUsage').innerText = d.cpu;
 
-      document.getElementById('webVolt').innerText = d.volt;
-      document.getElementById('webAmp').innerText = d.amp;
-      document.getElementById('webTemp').innerText = d.temp;
-
       document.getElementById('bar-max').style.width = Math.min((parseFloat(d.max)/200)*100, 100) + '%';
       document.getElementById('bar-avg').style.width = Math.min((parseFloat(d.avg)/200)*100, 100) + '%';
       document.getElementById('bar-alt').style.width = Math.min((parseFloat(d.alt)/2000)*100, 100) + '%'; 
@@ -455,17 +443,26 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       ctx.clearRect(0, 0, w, h);
 
       let maxVal = 10;
-      dataArray.forEach(row => { let v = parseFloat(row[colIdx]); if(v > maxVal) maxVal = v; });
+      dataArray.forEach(row => { 
+        if(row && row.length > colIdx) {
+          let v = parseFloat(row[colIdx]); 
+          if(!isNaN(v) && v > maxVal) maxVal = v; 
+        }
+      });
 
       ctx.beginPath(); ctx.strokeStyle = strokeColor; ctx.lineWidth = 2;
       for(let i=0; i<dataArray.length; i++) {
         let x = (i / (dataArray.length - 1)) * w;
-        let y = h - ((parseFloat(dataArray[i][colIdx]) / maxVal) * (h - 10)) - 5;
+        let y = h - 5; 
+        if(dataArray[i] && dataArray[i].length > colIdx) {
+          let v = parseFloat(dataArray[i][colIdx]);
+          if(!isNaN(v)) { y = h - ((v / maxVal) * (h - 10)) - 5; }
+        }
         if(i===0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
       }
       ctx.stroke();
 
-      if(currentIndex >= 0 && dataArray.length > 1) {
+      if(currentIndex >= 0 && dataArray.length > 1 && dataArray[currentIndex] && dataArray[currentIndex].length > colIdx) {
         let px = (currentIndex / (dataArray.length - 1)) * w;
         ctx.beginPath(); ctx.strokeStyle = '#ff0055'; ctx.lineWidth = 2;
         ctx.moveTo(px, 0); ctx.lineTo(px, h); ctx.stroke();
@@ -480,9 +477,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
         renderUI(data);
         
         if (data.isLogging !== lastLoggingState) {
-          if (!data.isLogging) {
-            loadFiles();
-          }
+          if (!data.isLogging) { loadFiles(); }
           lastLoggingState = data.isLogging;
         }
 
@@ -538,34 +533,56 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
     function restartDevice() { if(confirm("Yakin ingin merestart perangkat ESP8266?")) { fetch('/restart').then(() => { alert("Restarting..."); }); } }
 
     function processReplayFrame() {
+      if(!currentReplayData || currentReplayData.length === 0) return;
       document.getElementById('timeSlider').value = replayIndex;
       let row = currentReplayData[replayIndex];
+      
+      if(!row || row.length < 11) return; 
+      
       let d = {
         date: row[0], time: row[1], lat: row[2], lon: row[3], spd: row[4], max: row[5], avg: row[6], alt: row[7],
-        sat: row[10], volt: "0.0", amp: "0.0", temp: "0.0", ram: 0, rom: 0, cpu: 'Replay', buzzerState: buzzerEnabled
+        sat: row[10], ram: 0, rom: 0, cpu: 'Replay', buzzerState: buzzerEnabled
       };
-      if(row.length >= 15) { d.volt = row[12]; d.amp = row[13]; d.temp = row[14]; }
-      renderUI(d); drawCharts(currentReplayData, replayIndex);
+      
+      renderUI(d); 
+      drawCharts(currentReplayData, replayIndex);
     }
 
     function playReplay(fileName) {
       clearInterval(liveInterval); isReplaying = true;
       document.getElementById('logStatus').innerText = "REPLAYING"; document.getElementById('logStatus').style.color = "#00d2ff";
-      fetch('/view?file=' + fileName).then(response => response.text()).then(csv => {
+      
+      fetch('/view?file=' + fileName + '&t=' + Date.now()) 
+        .then(response => response.text())
+        .then(csv => {
           let lines = csv.split('\n').filter(line => line.trim().length > 0);
-          if(lines.length <= 1) { alert("Log kosong!"); stopReplay(); return; }
-          currentReplayData = []; for(let i=1; i<lines.length; i++){ currentReplayData.push(lines[i].split(',')); }
+          if(lines.length <= 1) { alert("Log kosong atau belum ada data masuk!"); stopReplay(); return; }
+          
+          currentReplayData = []; 
+          for(let i=1; i<lines.length; i++){ 
+            let cols = lines[i].split(',');
+            if(cols.length >= 11) {
+              currentReplayData.push(cols); 
+            }
+          }
+          
+          if(currentReplayData.length === 0) { alert("Data log rusak atau tidak valid!"); stopReplay(); return; }
+
           replayIndex = 0;
           document.getElementById('replayControls').style.display = 'block';
-          document.getElementById('timeSlider').max = currentReplayData.length - 1; document.getElementById('timeSlider').value = 0;
+          document.getElementById('timeSlider').max = currentReplayData.length - 1; 
+          document.getElementById('timeSlider').value = 0;
+          
           if(replayInterval) clearInterval(replayInterval);
           processReplayFrame();
+          
           replayInterval = setInterval(() => {
             replayIndex++;
             if(replayIndex >= currentReplayData.length) { stopReplay(); alert("Replay Selesai"); return; }
             processReplayFrame();
           }, 1000); 
-        });
+        })
+        .catch(err => { alert("Gagal Load Replay!"); stopReplay(); });
     }
 
     document.getElementById('timeSlider').addEventListener('input', function() { replayIndex = parseInt(this.value); processReplayFrame(); });
@@ -607,7 +624,6 @@ void handleData() {
   json += "\"spd\":\"" + String(currentSpeed, 1) + "\",\"max\":\"" + String(topSpeed, 1) + "\",\"avg\":\"" + String(currentAvg, 1) + "\",";
   json += "\"alt\":\"" + String(currentAlt, 1) + "\",\"maxAlt\":\"" + String(maxAltitude == -9999.0 ? 0 : maxAltitude, 1) + "\",";
   json += "\"minAlt\":\"" + String(minAltitude == 9999.0 ? 0 : minAltitude, 1) + "\",\"sat\":\"" + String(sats) + "\",\"bar\":\"" + String(signalBar) + "\",";
-  json += "\"volt\":\"" + String(currentVoltage, 2) + "\",\"amp\":\"" + String(currentAmpere, 2) + "\",\"temp\":\"" + String(moduleTemp, 1) + "\",";
   json += "\"lat\":\"" + String(gps.location.lat(), 6) + "\",\"lon\":\"" + String(gps.location.lng(), 6) + "\",";
   json += "\"ram\":" + String(ramUsagePct) + ",\"rom\":" + String(romUsagePct) + ",\"cpu\":\"" + cpuLoad + "\",";
   json += "\"buzzerState\":" + String(buzzerEnabled ? "true" : "false") + ",";
@@ -679,12 +695,13 @@ void logGPSData() {
       if(gps.altitude.isValid()) { if(currentAlt > maxAltitude) maxAltitude = currentAlt; if(currentAlt < minAltitude) minAltitude = currentAlt; }
       sumSpeed += currentSpeed; speedCount++; double avgSpeed = sumSpeed / speedCount;
       int signalBar = 0; if (sats >= 3) signalBar = 1; if (sats >= 5) signalBar = 2; if (sats >= 7) signalBar = 3; if (sats >= 9) signalBar = 4;
-      char logLine[180];
-      sprintf(logLine, "%02d/%02d/%04d,%02d:%02d:%02d,%.6f,%.6f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%d,%d,%.2f,%.2f,%.1f", 
+      
+      char logLine[150];
+      sprintf(logLine, "%02d/%02d/%04d,%02d:%02d:%02d,%.6f,%.6f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%d,%d", 
               day, gps.date.month(), gps.date.year(), hour, gps.time.minute(), gps.time.second(),
               gps.location.lat(), gps.location.lng(), currentSpeed, topSpeed, avgSpeed, 
               currentAlt, (maxAltitude == -9999.0 ? 0 : maxAltitude), (minAltitude == -9999.0 ? 0 : minAltitude), 
-              sats, signalBar, currentVoltage, currentAmpere, moduleTemp);
+              sats, signalBar);
       f.println(logLine); f.close();
     }
   }
@@ -929,9 +946,8 @@ void loop() {
         lastDisplayUpdate = millis(); display.clearDisplay(); display.setTextSize(1);
         display.setCursor(18, 0); display.print("Mencari Sinyal");
         
-        int cx = 64, cy = 28; int r1 = (millis() / 40) % 20; int r2 = (r1 + 10) % 20; 
+        int cx = 64, cy = 36; int r1 = (millis() / 40) % 20; int r2 = (r1 + 10) % 20; 
         display.fillCircle(cx, cy, 2, WHITE); display.drawCircle(cx, cy, r1, WHITE); display.drawCircle(cx, cy, r2, WHITE);
-        display.setCursor(10, 52); display.print("Satelit Ditemukan: "); display.print(sats);
         
         if (millis() - popupTimer < POPUP_DURATION && popupMsg != "") {
           int16_t x1, y1; uint16_t w, h; display.setTextSize(1); display.getTextBounds(popupMsg, 0, 0, &x1, &y1, &w, &h);
@@ -950,7 +966,7 @@ void loop() {
       if (currentSpeed > 0.0) {
         lastMoveTime = millis(); 
       }
-      else if (isScreenSaverEnabled && (millis() - lastMoveTime > 10000)) { // 10000 ms = 10 detik
+      else if (isScreenSaverEnabled && (millis() - lastMoveTime > 10000)) { 
         currentState = STATE_SCREENSAVER; 
         screensaverStartTime = millis(); 
         display.clearDisplay(); 
@@ -996,7 +1012,7 @@ void loop() {
       double currentSpeed = gps.speed.kmph(); if (currentSpeed < 1.0) currentSpeed = 0.0;
       
       if (currentSpeed > 0.0) { lastMoveTime = millis(); setOLEDContrast(255); currentState = STATE_SPEEDOMETER; display.clearDisplay(); break; }
-      if (isScreenSaverEnabled && (millis() - screensaverStartTime > 120000)) { currentState = STATE_SLEEP; display.clearDisplay(); display.ssd1306_command(SSD1306_DISPLAYOFF); break; } // 120000 ms = 2 menit dari screensaver
+      if (isScreenSaverEnabled && (millis() - screensaverStartTime > 120000)) { currentState = STATE_SLEEP; display.clearDisplay(); display.ssd1306_command(SSD1306_DISPLAYOFF); break; } 
 
       if (millis() - lastDisplayUpdate > 200) { 
         lastDisplayUpdate = millis(); display.clearDisplay();
@@ -1020,10 +1036,11 @@ void loop() {
           display.setCursor(0, 48); display.print("Lon: "); if (gps.location.isValid()) display.print(gps.location.lng(), 6); else display.print("Mencari...");
         }
         else if (page == 3) {
-          display.setTextSize(1); display.setCursor(0, 2); display.print("POWER & TEMP STATUS"); display.drawLine(0, 11, 128, 11, WHITE);
-          display.setCursor(0, 18); display.print("Voltage : "); display.print(currentVoltage, 1); display.print(" V");
-          display.setCursor(0, 32); display.print("Current : "); display.print(currentAmpere, 2); display.print(" A");
-          display.setCursor(0, 48); display.print("Temp    : "); display.print(moduleTemp, 1); display.print(" C");
+          display.setTextSize(1); display.setCursor(0, 0); display.print("ACTIVE FEATURES (BTN)"); display.drawLine(0, 9, 128, 9, WHITE);
+          display.setCursor(0, 14); display.print("WIFI(Hold): "); display.print(isWiFiEnabled ? "ON" : "OFF");
+          display.setCursor(0, 26); display.print("BUZZ(2x)  : "); display.print(buzzerEnabled ? "ON" : "OFF");
+          display.setCursor(0, 38); display.print("LOG (3x)  : "); display.print(isLogging ? "REC" : "STOP");
+          display.setCursor(0, 50); display.print("SAVE(5x)  : "); display.print(isScreenSaverEnabled ? "ON" : "OFF");
         }
         else if (page == 4) {
           drawSignalBars(sats); display.setTextSize(1); display.setCursor(45, 1); if (gps.time.isValid()) display.print(timeString); else display.print("--:--");
